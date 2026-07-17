@@ -20,10 +20,17 @@ import { StructuralDatasetClassificationService } from "../ai/structural-dataset
 import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
 import { DiscoveryService } from "../services/discovery-service.js";
 import { registerDiscoveryRoutes } from "../routes/discovery-routes.js";
+import type { AIProvider } from "../ai/providers/ai-provider.js";
+import { createConfiguredGeminiProvider } from "../ai/providers/gemini-provider.js";
+import { loadEnvironment, type Environment } from "../config/environment.js";
+import { InMemorySchemaRepository } from "../database/schema-repository.js";
+import { SchemaUnderstandingService } from "../services/schema-understanding-service.js";
+import { registerSchemaRoutes } from "../routes/schema-routes.js";
+import { registerTestingRoutes } from "../routes/testing-routes.js";
 
 export interface ApiApplication extends FastifyInstance {}
 
-export interface BuildAppOptions { readonly websiteHttpClient?: WebsiteHttpClient; readonly datasetClassifier?: DatasetClassificationService; }
+export interface BuildAppOptions { readonly websiteHttpClient?: WebsiteHttpClient; readonly datasetClassifier?: DatasetClassificationService; readonly aiProvider?: AIProvider | null; readonly environment?: Environment; }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplication> {
   const app = Fastify({ logger: false });
@@ -35,7 +42,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplic
         version: "1.0.0",
         description: "AI-first source-to-API platform foundation"
       },
-      tags: [{ name: "sources", description: "Source registration and lookup" }, { name: "discovery", description: "Dataset discovery and approval" }]
+      tags: [{ name: "sources", description: "Source registration and lookup" }, { name: "discovery", description: "Dataset discovery and approval" }, { name: "schema", description: "Dataset schema understanding" }]
     }
   });
 
@@ -62,10 +69,29 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplic
   const repository = new InMemorySourceRepository();
   const queue = new InMemoryJobQueue();
   const service = new SourceService(repository, queue);
-  const discoveryService = new DiscoveryService(repository, new InMemoryDiscoveryRepository(), new WebsiteCrawler(options.websiteHttpClient), options.datasetClassifier ?? new StructuralDatasetClassificationService());
+  const discoveryRepository = new InMemoryDiscoveryRepository();
+  const discoveryService = new DiscoveryService(repository, discoveryRepository, new WebsiteCrawler(options.websiteHttpClient), options.datasetClassifier ?? new StructuralDatasetClassificationService());
+  const environment = options.environment ?? loadEnvironment();
+  const resolvedProvider = options.aiProvider === undefined ? createConfiguredGeminiProvider(environment) : options.aiProvider;
+  const providerName = resolvedProvider?.name ?? "deterministic-fallback";
+  const providerModel = resolvedProvider?.model ?? environment.aiModel ?? "deterministic-fallback";
+  const schemaService = new SchemaUnderstandingService(discoveryRepository, new InMemorySchemaRepository(), resolvedProvider);
+
+  app.log.info({ geminiEnabled: providerName === "gemini", selectedProvider: providerName, selectedModel: providerModel }, "AI provider configuration");
 
   registerSourcesRoutes(app, service);
   registerDiscoveryRoutes(app, discoveryService);
+  registerSchemaRoutes(app, schemaService);
+  registerTestingRoutes(app, {
+    sourceService: service,
+    discoveryService,
+    schemaService,
+    classifier: options.datasetClassifier ?? new StructuralDatasetClassificationService(),
+    providerName,
+    providerModel,
+    tokenUsage: 0,
+    environment
+  });
 
   return app;
 }

@@ -31,6 +31,18 @@ describe("DiscoveryService", () => {
     expect(approved.snapshots.entries).toHaveLength(1);
   });
 
+  it("uses representative URLs for the default scope so approval can stay within a bounded crawl budget", async () => {
+    const sources = new InMemorySourceRepository(); await sources.create(source);
+    const repository = new InMemoryDiscoveryRepository();
+    const service = new DiscoveryService(sources, repository, new WebsiteCrawler(new FakeClient(), () => new Date("2026-01-01")), new FakeClassifier());
+    await service.discover(source.id, { maxPages: 5, maxDepth: 1, maxBytesPerPage: 10_000, timeoutMs: 1_000, maxRedirects: 5, allowedOrigins: [] });
+
+    const approved = await service.approveAndCapture({ candidateIds: ["candidate-1"], approvedBy: "user-1", scope: ["default"], crawlBudget: { maxPages: 2, maxDepth: 1, maxBytesPerPage: 10_000, timeoutMs: 1_000, maxRedirects: 5 } });
+
+    expect(approved.crawlPlan.urls).toEqual(["https://example.test/items"]);
+    expect(approved.crawlPlan.limits.maxPages).toBe(2);
+  });
+
   it("rejects scope expansion beyond selected candidate membership", async () => {
     const sources = new InMemorySourceRepository(); await sources.create(source);
     const service = new DiscoveryService(sources, new InMemoryDiscoveryRepository(), new WebsiteCrawler(new FakeClient()), new FakeClassifier());

@@ -16,9 +16,17 @@ Expose a `DiscoveryPreview` as the reviewable, user-facing summary of `DatasetCa
 
 ## Phase 3 — AI schema and field understanding across datasets
 
-Implement provider-neutral `FieldInferenceService` and `SchemaGenerationService` adapters that analyze representative, stratified samples from a `SnapshotCollection`, not one page. The services identify record boundaries, fields, optionality, type variation, relationships, pagination or collection semantics, and dataset-level consistency. Require structured, confidence-scored output, sample-selection rationale, evidence references, and model/prompt provenance. Persist a versioned `Schema` proposal associated with the dataset and the snapshot-collection revision.
+Implement provider-neutral FieldInferenceService and SchemaGenerationService adapters that analyze representative, deterministically selected samples from a SnapshotCollection, never the entire dataset. Sampling must be stratified across page types, navigation depth, and record variation while operating within configurable AI budgets for maximum pages, bytes, input tokens, output tokens, and execution time. If the configured AI budget would be exceeded, the request must fail rather than silently expanding AI usage.
 
-Build a redacted multi-page fixture corpus and offline evaluation harness before using proposals in customer flows. AI is introduced here as the normal mechanism for understanding each dataset, while deterministic checks verify sample coverage, schema validity, and evidence completeness.
+Before invoking AI, deterministically preprocess every sampled snapshot by removing non-semantic content such as scripts, stylesheets, navigation chrome, advertisements, tracking elements, comments, and other irrelevant markup, producing a reduced semantic representation suitable for inference. AI receives only these reduced representations together with deterministic metadata and evidence references, never raw crawls or live websites.
+
+The services identify record boundaries, fields, optionality, type variation, relationships, pagination or collection semantics, and dataset-level consistency. AI is responsible only for semantic understanding of the sampled dataset; it never crawls pages, requests additional content, expands crawl scope, generates extraction code, performs normalization, or executes business logic.
+
+Require structured JSON output conforming to validated schemas, including confidence scores, evidence references, representative examples, detected relationships, sample-selection rationale, model identifier, prompt version, and provider metadata. Reject free-form natural language responses that do not satisfy the required output schema.
+
+Persist a versioned Schema proposal associated with the dataset and snapshot-collection revision, together with immutable AI provenance including provider, model version, prompt version, preprocessing version, sampling strategy, confidence scores, and evaluation metadata. Cache AI analyses by snapshot fingerprint, preprocessing version, sampling strategy, prompt version, and model version so identical inputs reuse existing results instead of invoking the provider again.
+
+Build a redacted multi-page fixture corpus and offline evaluation harness before using proposals in customer flows. Deterministic validation verifies sample coverage, schema validity, evidence completeness, confidence thresholds, and output consistency before any proposal may be accepted. Confidence-based policy determines whether proposals are automatically accepted, require manual review, or are rejected. AI is introduced here solely as the semantic understanding layer, while deterministic systems remain responsible for sampling, preprocessing, validation, caching, execution, and all downstream behavior.
 
 ## Phase 4 — AI-generated dataset extraction plans with deterministic execution
 

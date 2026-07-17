@@ -13,13 +13,19 @@ export interface Environment {
   readonly port: number;
   readonly databaseUrl: string;
   readonly redisUrl: string;
+  readonly aiProvider?: string;
+  readonly aiModel?: string;
+  readonly geminiApiKey?: string;
 }
 
 const environmentSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().default("postgresql://localhost:5432/universal_api"),
-  REDIS_URL: z.string().default("redis://localhost:6379")
+  REDIS_URL: z.string().default("redis://localhost:6379"),
+  AI_PROVIDER: z.string().trim().min(1).optional(),
+  AI_MODEL: z.string().trim().min(1).optional(),
+  GEMINI_API_KEY: z.string().trim().min(1).optional()
 });
 
 export function loadEnvironment(): Environment {
@@ -34,7 +40,9 @@ export function loadEnvironment(): Environment {
     nodeEnv: parsed.data.NODE_ENV,
     port: parsed.data.PORT,
     databaseUrl: parsed.data.DATABASE_URL,
-    redisUrl: parsed.data.REDIS_URL
+    redisUrl: parsed.data.REDIS_URL,
+    aiProvider: parsed.data.AI_PROVIDER,
+    aiModel: parsed.data.AI_MODEL,
+    geminiApiKey: parsed.data.GEMINI_API_KEY
   };
 }
-

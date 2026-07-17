@@ -9,7 +9,7 @@ export const discoveryRoutePrefix = "/v1/discoveries";
 const limitsSchema = z.object({ maxPages: z.number().int().positive().max(10_000).optional(), maxDepth: z.number().int().min(0).max(20).optional(), maxBytesPerPage: z.number().int().positive().max(20_000_000).optional(), timeoutMs: z.number().int().positive().max(120_000).optional(), maxRedirects: z.number().int().min(0).max(20).optional(), allowedOrigins: z.array(z.string().url()).max(20).optional() }).optional();
 const discoverSchema = z.object({ limits: limitsSchema });
 const crawlBudgetSchema = z.object({ maxPages: z.number().int().positive().max(10_000).optional(), maxDepth: z.number().int().min(0).max(20).optional(), maxBytesPerPage: z.number().int().positive().max(20_000_000).optional(), timeoutMs: z.number().int().positive().max(120_000).optional(), maxRedirects: z.number().int().min(0).max(20).optional() }).optional();
-const approveSchema = z.object({ candidateIds: z.array(z.string().uuid()).min(1), approvedBy: z.string().min(1).max(200), scope: z.array(z.string().url()).min(1).optional(), crawlBudget: crawlBudgetSchema });
+const approveSchema = z.object({ candidateIds: z.array(z.string().uuid()).min(1), approvedBy: z.string().min(1).max(200), scope: z.array(z.union([z.string().url(), z.literal("default")])).min(1).optional(), crawlBudget: crawlBudgetSchema });
 
 const discoveryResultParamsSchema = { type: "object", required: ["discoveryResultId"], properties: { discoveryResultId: { type: "string", format: "uuid", description: "The DiscoveryResult identifier returned by POST /v1/sources/{sourceId}/discover." } } };
 const approvalBodySchema = {
@@ -18,7 +18,7 @@ const approvalBodySchema = {
   properties: {
     candidateIds: { type: "array", minItems: 1, description: "DatasetCandidate IDs selected from the DiscoveryPreview.", items: { type: "string", format: "uuid" } },
     approvedBy: { type: "string", description: "Auditable identifier of the user approving the dataset." },
-    scope: { type: "array", description: "Optional subset of selected candidate membership URLs. It cannot add URLs outside candidate membership.", items: { type: "string", format: "uri" } },
+    scope: { type: "array", description: "Optional subset of selected candidate membership URLs. Use the sentinel \"default\" to select the approved candidate membership URLs.", items: { anyOf: [{ type: "string", format: "uri" }, { type: "string", enum: ["default"] }] } },
     crawlBudget: { type: "object", description: "Optional limits for this crawl. Every override may only reduce the approved discovery limit; maxPages must still cover the selected scope.", properties: { maxPages: { type: "integer", minimum: 1 }, maxDepth: { type: "integer", minimum: 0 }, maxBytesPerPage: { type: "integer", minimum: 1 }, timeoutMs: { type: "integer", minimum: 1 }, maxRedirects: { type: "integer", minimum: 0 } } }
   }
 };

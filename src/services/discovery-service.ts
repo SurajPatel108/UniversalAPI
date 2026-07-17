@@ -37,7 +37,8 @@ export class DiscoveryService {
     const result = await this.requireResult(resultId);
     const source = await this.requireWebsite(result.sourceId);
     const allowed = new Set(selected.flatMap((candidate) => candidate.membershipUrls));
-    const scope = input.scope?.length ? input.scope : [...allowed];
+    const defaultScope = selected.flatMap((candidate) => candidate.representativeUrls.length > 0 ? candidate.representativeUrls : candidate.membershipUrls);
+    const scope = input.scope?.length ? this.normalizeScope(input.scope, defaultScope) : defaultScope;
     if (scope.some((url) => !allowed.has(url))) throw new ApplicationError("invalid_request", "Selected scope includes URLs outside approved candidate membership");
     const limits = { ...result.limits, ...input.crawlBudget };
     if (limits.maxPages < scope.length) throw new ApplicationError("invalid_request", "Crawl page budget must cover every selected URL");
@@ -50,6 +51,13 @@ export class DiscoveryService {
     const snapshots = await this.crawler.capturePlan(source, plan);
     await this.repository.saveSnapshotCollection(snapshots);
     return { dataset, crawlPlan: plan, snapshots };
+  }
+
+  private normalizeScope(scope: readonly string[], defaultScope: readonly string[]): string[] {
+    if (scope.includes("default")) {
+      return [...defaultScope];
+    }
+    return [...scope];
   }
 
   private async requireWebsite(sourceId: string) { const source = await this.sources.findById(sourceId); if (!source) throw new ApplicationError("not_found", "Source not found"); if (source.sourceType !== "website") throw new ApplicationError("unsupported_source", "Phase 2 discovery supports website sources only"); return source; }
