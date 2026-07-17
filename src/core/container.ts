@@ -6,7 +6,19 @@ Future: construct production and test containers with lifecycle hooks.
 Best practice: keep wiring centralized; do not use service locators inside domain code.
 */
 
+import { InMemoryJobQueue } from "../jobs/job-queue.js";
+import { InMemorySourceRepository } from "../database/source-repository.js";
+import { SourceService } from "../services/source-service.js";
+
 export interface ApplicationContainer {
-  // Add named ports/services here once their concrete adapters are implemented.
+  readonly sourceService: SourceService;
+}
+
+export function createContainer(): ApplicationContainer {
+  const repository = new InMemorySourceRepository();
+  const queue = new InMemoryJobQueue();
+  const sourceService = new SourceService(repository, queue);
+
+  return { sourceService };
 }
 

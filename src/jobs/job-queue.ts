@@ -7,5 +7,16 @@ Best practice: queue payloads must be versioned, small, serializable, and safe t
 */
 
 import type { RefreshSourceJob } from "./refresh-source-job.js";
-export interface JobQueue { enqueueRefresh(job: RefreshSourceJob): Promise<void>; }
+
+export interface JobQueue {
+  enqueueRefresh(job: RefreshSourceJob): Promise<void>;
+}
+
+export class InMemoryJobQueue implements JobQueue {
+  readonly enqueued: RefreshSourceJob[] = [];
+
+  async enqueueRefresh(job: RefreshSourceJob): Promise<void> {
+    this.enqueued.push(job);
+  }
+}
 

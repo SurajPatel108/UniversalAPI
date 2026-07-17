@@ -6,5 +6,22 @@ Future: graceful shutdown, telemetry bootstrap, and process-level error handling
 Best practice: keep business logic out of this file and make startup explicit and testable.
 */
 
-export {}; // Intentional placeholder until Phase 1 selects and configures the HTTP framework.
+import pino from "pino";
+import { buildApp } from "./api/app.js";
+import { loadEnvironment } from "./config/environment.js";
+
+async function main(): Promise<void> {
+  const env = loadEnvironment();
+  const logger = pino({ level: env.nodeEnv === "production" ? "info" : "debug" });
+  const app = await buildApp();
+
+  await app.listen({ port: env.port, host: "0.0.0.0" });
+  logger.info({ port: env.port }, "Universal API server listening");
+}
+
+main().catch((error: unknown) => {
+  const logger = pino();
+  logger.error({ err: error }, "Failed to start Universal API server");
+  process.exitCode = 1;
+});
 
