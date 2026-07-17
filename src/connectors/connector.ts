@@ -8,11 +8,15 @@ Best practice: connectors return neutral snapshots, isolate vendor SDKs, and ref
 
 import type { Source, SourceType } from "../models/source.js";
 import type { SourceSnapshot } from "../models/snapshot.js";
+import type { CrawlPlan } from "../models/crawl.js";
+import type { DiscoveryLimits, DiscoveryResult } from "../models/discovery.js";
+import type { SnapshotCollection } from "../models/snapshot-collection.js";
 
 export interface ConnectorCapabilities {
   readonly supportsIncrementalSync: boolean;
   readonly supportsStructuredMetadata: boolean;
   readonly requiresCredentialReference: boolean;
+  readonly supportsBoundedDiscovery?: boolean;
 }
 
 export interface CapturedSource {
@@ -27,3 +31,8 @@ export interface Connector {
   capture(source: Source): Promise<CapturedSource>;
 }
 
+/** Phase 2 extension: source exploration and collection capture remain connector-owned and deterministic. */
+export interface DatasetDiscoveryConnector extends Connector {
+  discover(source: Source, limits: DiscoveryLimits): Promise<DiscoveryResult>;
+  capturePlan(source: Source, plan: CrawlPlan): Promise<SnapshotCollection>;
+}

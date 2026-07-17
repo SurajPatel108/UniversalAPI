@@ -1,39 +1,55 @@
 # Build roadmap
 
-Each phase produces a deployable vertical slice, tests, metrics, and an explicit rollback path before proceeding.
+Each phase produces a deployable vertical slice, tests, metrics, and an explicit rollback path before proceeding. Phase 1 is complete and remains unchanged. Beginning in Phase 2, a source can contain multiple logical datasets; the platform discovers them, the user selects the intended dataset or datasets, and all later work operates over snapshot collections rather than a single webpage.
 
 ## Phase 1 — foundation, source registration, and connector contract
 
 Add Fastify, environment validation, structured logging, migrations, authentication/tenancy, and `POST/GET /v1/sources`. Persist source type, connector configuration, ownership, refresh policy, and lifecycle status. Define `Connector`, `ConnectorRegistry`, secret references, and capability metadata now so every later source fits the same contract.
 
-## Phase 2 — safe website connector and source snapshots
+## Phase 2 — website discovery, AI dataset classification, selection, and bounded crawling
 
-Implement the website Connector using DNS/IP safety checks, robots policy, redirect limits, timeouts, rate limits, content-size limits, and HTML snapshot storage. Begin with static HTTP; add a separately budgeted browser renderer only for opt-in dynamic sites. Emit capture telemetry and fixtures for failures. This is the first implementation of the source-agnostic connector boundary.
+Evolve the website Connector into a safe, bounded discovery and crawl capability without changing Phase 1 source registration. Starting from the provided URL, apply DNS/IP safety checks, robots policy, redirect limits, timeouts, rate limits, content-size limits, origin/scope rules, and configurable page, depth, duration, and rendering budgets. Begin with static HTTP; add a separately budgeted browser renderer only for opt-in dynamic sites.
 
-## Phase 3 — AI-first schema and field understanding
+Deterministic discovery explores navigation menus, category and index pages, internal links, sitemaps when authorized, and other structural pages within those limits. It persists an auditable hierarchical site map and a `DiscoveryResult` containing collected pages, navigation structure, metadata, and membership evidence. AI analyzes that deterministic result to produce proposed logical `DatasetCandidate`s—such as products, listings, documentation, articles, categories, collections, and directories. Each candidate includes its membership evidence, URL-pattern and navigation rules, representative pages, estimated page count, estimated record count when possible, crawl cost/time and complexity, access constraints, confidence, and explanation. AI does not explore pages, determine crawl scope, or select candidates.
 
-Implement provider-neutral `FieldInferenceService` and `SchemaGenerationService` adapters. Require structured, confidence-scored output and persist model/prompt provenance, evidence, and evaluation inputs. Build a redacted fixture corpus and offline evaluation harness before using proposals in customer flows. AI is introduced here as the normal mechanism for understanding every source.
+Expose a `DiscoveryPreview` as the reviewable, user-facing summary of `DatasetCandidate`s before selection. It presents candidate name, classification, estimated page count, estimated record count when possible, estimated crawl cost/time, confidence, representative pages, and known risks or access limitations. The user explicitly approves one or more candidates, optionally adjusts permitted scope/budget, and each approval creates a `Dataset`; the system then creates a versioned `CrawlPlan` for that dataset. Deterministic crawling captures an immutable `SnapshotCollection`: one content snapshot and crawl outcome for every planned dataset page, including skipped, failed, duplicate, and out-of-scope decisions. Ship discovery/crawl telemetry, fixtures, resumability, idempotency, and clear partial-crawl status. This is the first dataset-centric implementation of the source-agnostic connector boundary.
 
-## Phase 4 — AI-generated extraction plans with deterministic execution
+## Phase 3 — AI schema and field understanding across datasets
 
-Implement `SelectorGenerationService`, declarative extraction definitions, static DOM parsing, preview, normalization, and quality validation. The model proposes a plan; parser/extractor code executes it deterministically against the snapshot. Persist immutable versions with snapshots, AI provenance, diagnostics, and approval outcome. Support human edits and review, but do not make manual selectors the architectural default.
+Implement provider-neutral `FieldInferenceService` and `SchemaGenerationService` adapters that analyze representative, stratified samples from a `SnapshotCollection`, not one page. The services identify record boundaries, fields, optionality, type variation, relationships, pagination or collection semantics, and dataset-level consistency. Require structured, confidence-scored output, sample-selection rationale, evidence references, and model/prompt provenance. Persist a versioned `Schema` proposal associated with the dataset and the snapshot-collection revision.
 
-## Phase 5 — endpoint publication
+Build a redacted multi-page fixture corpus and offline evaluation harness before using proposals in customer flows. AI is introduced here as the normal mechanism for understanding each dataset, while deterministic checks verify sample coverage, schema validity, and evidence completeness.
 
-Add stable public slugs, endpoint authorization, version selection, pagination, filtering, response envelopes, OpenAPI docs, and source-level quotas. Endpoint URLs must remain stable while an underlying version changes.
+## Phase 4 — AI-generated dataset extraction plans with deterministic execution
 
-## Phase 6 — cache and refresh workflow
+Implement `SelectorGenerationService`, declarative extraction definitions, static DOM parsing, collection preview, normalization, and quality validation. The model proposes a versioned `ExtractionPlan` that specifies deterministic record discovery, field extraction, page-type handling, pagination behavior, and normalization rules across the selected dataset. Parser/extractor code executes the plan deterministically against every applicable snapshot in a `SnapshotCollection`; AI never executes code or skips validation.
 
-Introduce Redis, a durable job queue, idempotency keys, retries/backoff, dead-letter handling, and manual refresh. Cache only validated published versions and define invalidation after publication. Load-test concurrent reads and refreshes.
+Persist immutable plan and output versions with dataset identity, snapshot coverage, AI provenance, diagnostics, evaluation results, and approval outcome. Validate per-page and aggregate quality thresholds, duplicate handling, coverage, schema conformance, and representative edge cases. Support human review and edits, but do not make manual selectors the architectural default.
 
-## Phase 7 — monitoring, change detection, and AI-driven replanning
+## Phase 5 — dataset API publication
 
-Schedule refreshes, fingerprint snapshots and extraction output, classify meaningful vs cosmetic changes, alert owners, and expose health/history. On meaningful drift, run AI replanning and deterministic evaluation before promotion. Add SLOs for endpoint freshness, success rate, plan quality, latency, and AI cost.
+Add stable public API slugs, endpoint authorization, dataset/plan version selection, pagination, filtering, response envelopes, OpenAPI docs, and dataset-level quotas. A published API binds a selected dataset to an approved schema and extraction-plan version, and serves records extracted from its validated snapshot collection. Endpoint URLs must remain stable while an underlying published version changes. Publication must make lineage from response records to dataset, plan, and snapshots auditable.
 
-## Phase 8 — AI repair, evaluation, and controlled publication
+## Phase 6 — dataset refresh, cache, and recrawl workflow
 
-Implement `RepairService` as a first-class replanning path that receives redacted diagnostics and proposes a revised definition. Evaluate it against historical fixtures and live canaries, apply confidence/risk thresholds, retain one-click rollback, and automate publication only for explicitly approved low-risk policies. Never let a model bypass the deterministic gate or audit trail.
+Introduce Redis, a durable job queue, idempotency keys, retries/backoff, dead-letter handling, and manual refresh. Refresh begins with bounded rediscovery or plan-aware recrawling, reconciles dataset membership against the approved crawl plan, then captures a new snapshot collection before extraction. Define incremental recrawl eligibility, additions/removals, tombstones, partial-refresh policy, and when changed discovery requires user review rather than automatic expansion of scope.
 
-## Phase 9 — additional sources
+Cache only validated published dataset versions and define invalidation after publication. Load-test concurrent reads, discovery, crawling, refreshes, and partial-failure recovery.
 
-Implement PDF, spreadsheet, database, Notion, and internal-dashboard Connectors behind the common snapshot/pipeline contracts. Add connector-specific deterministic executors where needed, credentials-vault integration, security reviews, and capability discovery. Reuse the same AI planner, evaluation loop, and publication controls rather than creating separate product paths.
+## Phase 7 — dataset monitoring, change detection, and AI-driven replanning
+
+Schedule dataset refreshes and monitor crawl-plan conformance, membership drift, page availability, snapshot fingerprints, extraction coverage, schema conformance, record freshness, and output quality across the collection. Classify meaningful structural/data changes separately from cosmetic page changes; alert owners and expose dataset health, lineage, and history.
+
+On meaningful drift, run AI replanning against representative changed and unchanged samples, then deterministically evaluate the candidate plan across the dataset before promotion. Add SLOs for API freshness, crawl completeness, extraction success/coverage, plan quality, latency, and AI cost.
+
+## Phase 8 — AI repair, evaluation, and controlled dataset publication
+
+Implement `RepairService` as a first-class dataset replanning path that receives redacted diagnostics, failed/changed page samples, prior plan evidence, and coverage statistics. It proposes a revised `ExtractionPlan` and, when warranted, a schema or crawl-plan review request; it cannot silently expand the user's selected dataset. Evaluate candidate repairs against historical snapshot collections, current representative fixtures, and live canaries, with per-page and aggregate thresholds.
+
+Apply confidence/risk thresholds, retain one-click rollback, and automate publication only for explicitly approved low-risk policies. Never let a model bypass deterministic gates, user dataset selection, or the audit trail.
+
+## Phase 9 — additional sources and dataset discovery adapters
+
+Implement PDF, spreadsheet, database, Notion, and internal-dashboard Connectors behind the common source, deterministic discovery, dataset-candidate, dataset, crawl-plan, snapshot-collection, and publication contracts. Where an adapter cannot crawl URLs, define its bounded enumeration equivalent—for example sheets/ranges, tables, folders, collections, or query partitions. Add connector-specific deterministic executors where needed, credentials-vault integration, security reviews, and capability discovery.
+
+Reuse the same AI understanding, planning, evaluation, monitoring, repair, and publication controls rather than creating source-specific product paths.

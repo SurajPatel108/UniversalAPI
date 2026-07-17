@@ -14,10 +14,18 @@ import { InMemoryJobQueue } from "../jobs/job-queue.js";
 import { InMemorySourceRepository } from "../database/source-repository.js";
 import { SourceService } from "../services/source-service.js";
 import { registerSourcesRoutes } from "../routes/sources-routes.js";
+import { InMemoryDiscoveryRepository } from "../database/discovery-repository.js";
+import { WebsiteCrawler, type WebsiteHttpClient } from "../crawlers/website-crawler.js";
+import { StructuralDatasetClassificationService } from "../ai/structural-dataset-classification-service.js";
+import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
+import { DiscoveryService } from "../services/discovery-service.js";
+import { registerDiscoveryRoutes } from "../routes/discovery-routes.js";
 
 export interface ApiApplication extends FastifyInstance {}
 
-export async function buildApp(): Promise<ApiApplication> {
+export interface BuildAppOptions { readonly websiteHttpClient?: WebsiteHttpClient; readonly datasetClassifier?: DatasetClassificationService; }
+
+export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplication> {
   const app = Fastify({ logger: false });
 
   await app.register(swagger, {
@@ -27,7 +35,7 @@ export async function buildApp(): Promise<ApiApplication> {
         version: "1.0.0",
         description: "AI-first source-to-API platform foundation"
       },
-      tags: [{ name: "sources", description: "Source registration and lookup" }]
+      tags: [{ name: "sources", description: "Source registration and lookup" }, { name: "discovery", description: "Dataset discovery and approval" }]
     }
   });
 
@@ -54,9 +62,10 @@ export async function buildApp(): Promise<ApiApplication> {
   const repository = new InMemorySourceRepository();
   const queue = new InMemoryJobQueue();
   const service = new SourceService(repository, queue);
+  const discoveryService = new DiscoveryService(repository, new InMemoryDiscoveryRepository(), new WebsiteCrawler(options.websiteHttpClient), options.datasetClassifier ?? new StructuralDatasetClassificationService());
 
   registerSourcesRoutes(app, service);
+  registerDiscoveryRoutes(app, discoveryService);
 
   return app;
 }
-
