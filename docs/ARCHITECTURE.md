@@ -83,6 +83,8 @@ Deterministic execution records per-snapshot results and validates aggregate pro
 
 ## Extension path
 
+For websites, `WebsiteConnector` uses a configured Crawl4AI sidecar as a private acquisition implementation. Crawl4AI output is mapped to neutral connector artifacts (HTML, markdown, cleaned content, metadata, links, and optional screenshots) before it reaches domain services. The connector remains responsible for deterministic scope and budget enforcement; Crawl4AI types and wire formats never escape the connector.
+
 Add a source by implementing `Connector` for its `SourceType` and registering it in `ConnectorRegistry`. The connector validates configuration and supports the source's bounded discovery/enumeration and snapshot capture semantics. For non-web sources, discovery maps to their native collection structure: sheets/ranges, tables, folders, documents, query partitions, or other enumerable units. The generic pipeline still produces the same dataset artifacts.
 
 Connector-specific deterministic executors can be added only where the common parser/extractor is insufficient. Schema generation, field inference, selector generation, and repair live in `src/ai` behind provider-neutral interfaces. All proposals require deterministic validation, evaluation, audit, and approval policy before publication.

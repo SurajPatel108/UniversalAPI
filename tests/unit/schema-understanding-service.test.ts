@@ -14,8 +14,10 @@ class FakeProvider implements AIProvider {
 }
 
 describe("SchemaUnderstandingService", () => {
-  it("reads GEMINI_API_KEY from the environment", () => {
+  it("reads GEMINI_API_KEY from injected production environment", () => {
     const previous = process.env.GEMINI_API_KEY;
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
     process.env.GEMINI_API_KEY = "test-key";
 
     try {
@@ -23,13 +25,22 @@ describe("SchemaUnderstandingService", () => {
       expect(environment.geminiApiKey).toBe("test-key");
     } finally {
       if (previous === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previous;
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = previousNodeEnv;
     }
   });
 
   it("creates a Gemini provider whenever a Gemini API key is configured", () => {
     const provider = createConfiguredGeminiProvider({ nodeEnv: "development", port: 3000, databaseUrl: "", redisUrl: "", geminiApiKey: "test-key" });
     expect(provider?.name).toBe("gemini");
-    expect(provider?.model).toBe("gemini-2.0-flash-exp");
+    expect(provider?.model).toBe("gemini-3.1-flash-lite");
+  });
+
+  it("surfaces provider failures instead of silently returning an empty schema", async () => {
+    const discoveries = new InMemoryDiscoveryRepository();
+    await discoveries.saveSnapshotCollection({ id: "collection-3", sourceId: "source-1", datasetId: "dataset-1", crawlPlanId: "plan-1", completed: true, createdAt: new Date(), entries: [] });
+    const failingProvider: AIProvider = { name: "fake", model: "fake-model", async generateStructured() { throw new Error("Gemini auth failed"); } };
+
+    await expect(new SchemaUnderstandingService(discoveries, new InMemorySchemaRepository(), failingProvider).analyze("collection-3")).rejects.toThrow("Gemini auth failed");
   });
 
   it("uses only bounded redacted samples and caches a collection revision", async () => {

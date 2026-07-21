@@ -14,6 +14,8 @@ import { createConfiguredGeminiProvider } from "./ai/providers/gemini-provider.j
 async function main(): Promise<void> {
   const env = loadEnvironment();
   const logger = pino({ level: env.nodeEnv === "production" ? "info" : "debug" });
+  const crawl4aiOrigin = env.crawl4aiBaseUrl ? new URL(env.crawl4aiBaseUrl).origin : undefined;
+  logger.info({ crawl4aiConfigured: Boolean(crawl4aiOrigin), crawl4aiOrigin }, "Website acquisition configuration");
   const provider = createConfiguredGeminiProvider(env);
   logger.info({ geminiEnabled: Boolean(provider), selectedProvider: provider?.name ?? "deterministic-fallback", selectedModel: provider?.model ?? env.aiModel ?? "deterministic-fallback" }, "AI provider configuration");
   const app = await buildApp();
@@ -27,4 +29,3 @@ main().catch((error: unknown) => {
   logger.error({ err: error }, "Failed to start Universal API server");
   process.exitCode = 1;
 });
-

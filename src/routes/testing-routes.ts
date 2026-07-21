@@ -13,7 +13,7 @@ import type { SourceService } from "../services/source-service.js";
 import type { DiscoveryService } from "../services/discovery-service.js";
 import type { SchemaUnderstandingService } from "../services/schema-understanding-service.js";
 import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
-import { defaultDiscoveryLimits } from "../crawlers/website-crawler.js";
+import { defaultDiscoveryLimits } from "../models/discovery.js";
 
 const runPayloadSchema = z.object({
   url: z.string().url(),
@@ -44,6 +44,8 @@ export interface TestingDashboardRunResult {
   readonly totalTokens: number;
   readonly generatedIds: string[];
   readonly logs: readonly string[];
+  readonly acquisitionDiagnostics: readonly { readonly url: string; readonly stage: "Acquisition"; readonly reason: string }[];
+  readonly error: string | null;
   readonly schemaPreview: {
     readonly fields: Array<{ readonly name: string; readonly type: string; readonly required: boolean; readonly confidence: number; readonly evidence: string }>;
     readonly rationale: string;
@@ -98,6 +100,10 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       <div id="summary" class="summary"></div>
     </div>
     <div class="card">
+      <h2>Errors</h2>
+      <div id="error-banner">No errors.</div>
+    </div>
+    <div class="card">
       <h2>Schema Preview</h2>
       <div id="schema-preview"></div>
     </div>
@@ -105,6 +111,7 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       const runButton = document.getElementById('run');
       const logEl = document.getElementById('log');
       const summaryEl = document.getElementById('summary');
+      const errorEl = document.getElementById('error-banner');
       const schemaPreviewEl = document.getElementById('schema-preview');
       const appendLog = (message) => {
         if (!message) {
@@ -115,6 +122,16 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       const setRunningState = (isRunning) => {
         runButton.disabled = isRunning;
         runButton.textContent = isRunning ? 'Running...' : 'Run Pipeline';
+      };
+      const renderError = (errorMessage, acquisitionDiagnostics) => {
+        const diagnostics = Array.isArray(acquisitionDiagnostics) ? acquisitionDiagnostics : [];
+        const diagnosticText = diagnostics.map((diagnostic) => diagnostic.stage + ' failed for ' + diagnostic.url + ': ' + diagnostic.reason).join('\n');
+        const combined = [errorMessage, diagnosticText].filter(Boolean).join('\n');
+        if (!combined) {
+          errorEl.innerHTML = '<div>No errors.</div>';
+          return;
+        }
+        errorEl.innerHTML = '<div style="color: #fda4af; white-space: pre-wrap;">' + combined + '</div>';
       };
       const renderSummary = (summary) => {
         const items = [
@@ -150,6 +167,7 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         logEl.textContent = '';
         appendLog('Starting…');
         renderSummary({ elapsedMs: 0, discoveredDatasets: 0, datasetId: 'n/a', pagesCrawled: 0, snapshotsCaptured: 0, schemaFields: 0, provider: 'n/a', model: 'n/a', promptTokens: 0, completionTokens: 0, totalTokens: 0, generatedIds: [] });
+        renderError(null);
         renderSchemaPreview(null);
         try {
           const response = await fetch('/testing/run', {
@@ -177,11 +195,11 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
           if (!response.ok) {
             const detail = responseText ? '\n' + responseText : '';
             appendLog('Request failed (HTTP ' + response.status + ')' + detail);
-            return;
           }
           const logLines = Array.isArray(payload.logs) ? payload.logs : [];
           logEl.textContent = logLines.join('\n');
           renderSummary(payload);
+          renderError(payload.error || null, payload.acquisitionDiagnostics);
           renderSchemaPreview(payload.schemaPreview);
         } catch (error) {
           appendLog(error instanceof Error ? error.message : String(error));
@@ -227,73 +245,114 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
     const logs: string[] = [];
     const generatedIds: string[] = [];
     const steps = parsed.data.steps;
+    let errorMessage: string | null = null;
+    let acquisitionDiagnostics: readonly { readonly url: string; readonly stage: "Acquisition"; readonly reason: string }[] = [];
 
-    const source = await deps.sourceService.createSource({ sourceType: "website", url: parsed.data.url });
-    generatedIds.push(source.id);
-    logs.push(`Created source ${source.id}`);
+    try {
+      const source = await deps.sourceService.createSource({ sourceType: "website", url: parsed.data.url });
+      generatedIds.push(source.id);
+      logs.push(`Created source ${source.id}`);
 
-    let discoveryResultId: string | null = null;
-    let candidateId: string | null = null;
-    let datasetId: string | null = null;
-    let snapshotCollectionId: string | null = null;
-    let schemaId: string | null = null;
-    let discoveredDatasets = 0;
-    let pagesCrawled = 0;
-    let snapshotsCaptured = 0;
-    let schemaFields = 0;
+      let discoveryResultId: string | null = null;
+      let candidateId: string | null = null;
+      let datasetId: string | null = null;
+      let snapshotCollectionId: string | null = null;
+      let schemaId: string | null = null;
+      let discoveredDatasets = 0;
+      let pagesCrawled = 0;
+      let snapshotsCaptured = 0;
+      let schemaFields = 0;
 
-    if (steps.discovery) {
-      const preview = await deps.discoveryService.discover(source.id, { ...defaultDiscoveryLimits, maxPages: 10, maxDepth: 2, allowedOrigins: [] });
-      discoveryResultId = preview.discoveryResultId;
-      discoveredDatasets = preview.candidates.length;
-      pagesCrawled = preview.candidates.reduce((total, candidate) => total + candidate.estimatedPageCount, 0);
-      candidateId = preview.candidates[0]?.candidateId ?? null;
-      logs.push(`Discovery completed for ${preview.candidates.length} candidate(s)`);
+      if (steps.discovery) {
+        const preview = await deps.discoveryService.discover(source.id, { ...defaultDiscoveryLimits, maxPages: 10, maxDepth: 2, allowedOrigins: [] });
+        discoveryResultId = preview.discoveryResultId;
+        discoveredDatasets = preview.candidates.length;
+        pagesCrawled = preview.candidates.reduce((total, candidate) => total + candidate.estimatedPageCount, 0);
+        candidateId = preview.candidates[0]?.candidateId ?? null;
+        logs.push(`Discovery completed for ${preview.candidates.length} candidate(s)`);
+        acquisitionDiagnostics = await deps.discoveryService.acquisitionDiagnostics(preview.discoveryResultId);
+        for (const diagnostic of acquisitionDiagnostics) logs.push(`${diagnostic.stage} failed for ${diagnostic.url}: ${diagnostic.reason}`);
+        if (preview.candidates.length === 0 && acquisitionDiagnostics.length > 0) {
+          errorMessage = "Discovery could not produce dataset candidates because acquisition failed.";
+          logs.push("Dataset approval skipped because prerequisite discovery did not succeed.");
+          logs.push("Snapshot capture skipped because prerequisite discovery did not succeed.");
+          logs.push("Schema generation skipped because prerequisite discovery did not succeed.");
+        }
+      }
+
+      if (steps.approval && discoveryResultId && candidateId) {
+        const approved = await deps.discoveryService.approveAndCapture({ candidateIds: [candidateId], approvedBy: "testing-dashboard", scope: ["default"], crawlBudget: { maxPages: 5, maxDepth: 1, maxBytesPerPage: 1_000_000, timeoutMs: 10_000, maxRedirects: 5 } });
+        datasetId = approved.dataset.id;
+        snapshotCollectionId = approved.snapshots.id;
+        generatedIds.push(approved.dataset.id, approved.crawlPlan.id, approved.snapshots.id);
+        logs.push(`Approval completed for dataset ${approved.dataset.id}`);
+      }
+
+      if (steps.snapshotCapture && snapshotCollectionId) {
+        snapshotsCaptured = (await deps.discoveryService.preview(discoveryResultId!)).candidates.length;
+        logs.push(`Snapshot capture completed for ${snapshotCollectionId}`);
+      }
+
+      if (steps.schema && snapshotCollectionId) {
+        const schema = await deps.schemaService.analyze(snapshotCollectionId);
+        schemaId = schema.id;
+        schemaFields = schema.fields.length;
+        generatedIds.push(schema.id);
+        logs.push(`Schema generation completed with ${schema.fields.length} field(s)`);
+      }
+
+      const schemaRunMetadata = deps.schemaService.getLastRunMetadata?.() ?? null;
+
+      return reply.send({
+        elapsedMs: Date.now() - startedAt,
+        sourceId: source.id,
+        discoveryResultId,
+        candidateId,
+        datasetId,
+        snapshotCollectionId,
+        schemaId,
+        discoveredDatasets,
+        pagesCrawled,
+        snapshotsCaptured,
+        schemaFields,
+        provider: deps.providerName,
+        model: deps.providerModel,
+        promptTokens: schemaRunMetadata?.promptTokens ?? 0,
+        completionTokens: schemaRunMetadata?.completionTokens ?? 0,
+        totalTokens: schemaRunMetadata?.totalTokens ?? 0,
+        generatedIds,
+        logs,
+        acquisitionDiagnostics,
+        error: errorMessage,
+        schemaPreview: schemaRunMetadata?.schemaPreview ?? null
+      } satisfies TestingDashboardRunResult);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+      logs.push(`Pipeline failed: ${errorMessage}`);
+      const schemaRunMetadata = deps.schemaService.getLastRunMetadata?.() ?? null;
+      return reply.status(500).send({
+        elapsedMs: Date.now() - startedAt,
+        sourceId: null,
+        discoveryResultId: null,
+        candidateId: null,
+        datasetId: null,
+        snapshotCollectionId: null,
+        schemaId: null,
+        discoveredDatasets: 0,
+        pagesCrawled: 0,
+        snapshotsCaptured: 0,
+        schemaFields: 0,
+        provider: deps.providerName,
+        model: deps.providerModel,
+        promptTokens: schemaRunMetadata?.promptTokens ?? 0,
+        completionTokens: schemaRunMetadata?.completionTokens ?? 0,
+        totalTokens: schemaRunMetadata?.totalTokens ?? 0,
+        generatedIds,
+        logs,
+        acquisitionDiagnostics: [],
+        error: errorMessage,
+        schemaPreview: schemaRunMetadata?.schemaPreview ?? null
+      } satisfies TestingDashboardRunResult);
     }
-
-    if (steps.approval && discoveryResultId && candidateId) {
-      const approved = await deps.discoveryService.approveAndCapture({ candidateIds: [candidateId], approvedBy: "testing-dashboard", scope: ["default"], crawlBudget: { maxPages: 5, maxDepth: 1, maxBytesPerPage: 1_000_000, timeoutMs: 10_000, maxRedirects: 5 } });
-      datasetId = approved.dataset.id;
-      snapshotCollectionId = approved.snapshots.id;
-      generatedIds.push(approved.dataset.id, approved.crawlPlan.id, approved.snapshots.id);
-      logs.push(`Approval completed for dataset ${approved.dataset.id}`);
-    }
-
-    if (steps.snapshotCapture && snapshotCollectionId) {
-      snapshotsCaptured = (await deps.discoveryService.preview(discoveryResultId!)).candidates.length;
-      logs.push(`Snapshot capture completed for ${snapshotCollectionId}`);
-    }
-
-    if (steps.schema && snapshotCollectionId) {
-      const schema = await deps.schemaService.analyze(snapshotCollectionId);
-      schemaId = schema.id;
-      schemaFields = schema.fields.length;
-      generatedIds.push(schema.id);
-      logs.push(`Schema generation completed with ${schema.fields.length} field(s)`);
-    }
-
-    const schemaRunMetadata = deps.schemaService.getLastRunMetadata?.() ?? null;
-
-    return reply.send({
-      elapsedMs: Date.now() - startedAt,
-      sourceId: source.id,
-      discoveryResultId,
-      candidateId,
-      datasetId,
-      snapshotCollectionId,
-      schemaId,
-      discoveredDatasets,
-      pagesCrawled,
-      snapshotsCaptured,
-      schemaFields,
-      provider: deps.providerName,
-      model: deps.providerModel,
-      promptTokens: schemaRunMetadata?.promptTokens ?? 0,
-      completionTokens: schemaRunMetadata?.completionTokens ?? 0,
-      totalTokens: schemaRunMetadata?.totalTokens ?? 0,
-      generatedIds,
-      logs,
-      schemaPreview: schemaRunMetadata?.schemaPreview ?? null
-    } satisfies TestingDashboardRunResult);
   });
 }

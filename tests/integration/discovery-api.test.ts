@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "../../src/api/app.js";
-import type { WebsiteHttpClient } from "../../src/crawlers/website-crawler.js";
+import { WebsiteConnector, type WebsiteAcquisitionEngine } from "../../src/connectors/website-connector.js";
 import type { AIProvider, StructuredGenerationRequest } from "../../src/ai/providers/ai-provider.js";
 
-class FakeWebsiteHttpClient implements WebsiteHttpClient {
-  async get(url: string): Promise<{ finalUrl: string; contentType: string; body: string }> {
-    if (url === "https://example.test/") return { finalUrl: url, contentType: "text/html", body: '<title>Catalog</title><a href="/items">Items</a>' };
-    if (url === "https://example.test/items") return { finalUrl: url, contentType: "text/html", body: "<title>Items</title>" };
+class FakeWebsiteEngine implements WebsiteAcquisitionEngine {
+  async acquire(url: string): Promise<{ rawHtml: string; metadata: Record<string, unknown>; links: string[]; finalUrl: string }> {
+    if (url === "https://example.test/") return { finalUrl: url, metadata: {}, links: ["/items"], rawHtml: '<title>Catalog</title>' };
+    if (url === "https://example.test/items") return { finalUrl: url, metadata: {}, links: [], rawHtml: "<title>Items</title>" };
     throw new Error("not found");
   }
 }
@@ -16,9 +16,16 @@ class FakeSchemaProvider implements AIProvider {
   async generateStructured(_request: StructuredGenerationRequest): Promise<unknown> { return { schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] }, fields: [{ name: "name", type: "string", required: true, confidence: 0.8, evidence: "title" }], rationale: "Test schema", confidence: 0.8 }; }
 }
 
+class DelayedWebsiteEngine implements WebsiteAcquisitionEngine {
+  private release: (() => void) | null = null;
+  private readonly ready = new Promise<void>((resolve) => { this.release = resolve; });
+  async acquire(url: string): Promise<{ rawHtml: string; metadata: Record<string, unknown>; links: string[]; finalUrl: string }> { await this.ready; return { finalUrl: url, metadata: {}, links: [], rawHtml: "<title>Delayed</title>" }; }
+  complete(): void { this.release?.(); }
+}
+
 describe("discovery API", () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
-  beforeAll(async () => { app = await buildApp({ websiteHttpClient: new FakeWebsiteHttpClient(), aiProvider: new FakeSchemaProvider() }); await app.ready(); });
+  beforeAll(async () => { app = await buildApp({ websiteConnector: new WebsiteConnector(new FakeWebsiteEngine()), aiProvider: new FakeSchemaProvider() }); await app.ready(); });
   afterAll(async () => { await app.close(); });
 
   it("discovers deterministically, returns a preview, and approves/captures a selected dataset", async () => {
@@ -39,6 +46,7 @@ describe("discovery API", () => {
     expect(approved.dataset.id).toMatch(/^[0-9a-f-]{36}$/i);
     expect(approved.crawlPlan.id).toMatch(/^[0-9a-f-]{36}$/i);
     expect(approved.snapshotCollection.id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(Object.keys(approved).sort()).toEqual(["crawlPlan", "dataset", "snapshotCollection"]);
     const schemaResponse = await app.inject({ method: "POST", url: `/v1/snapshot-collections/${approved.snapshotCollection.id}/schema` });
     expect(schemaResponse.statusCode).toBe(201);
     expect(JSON.parse(schemaResponse.body)).toMatchObject({ snapshotCollectionId: approved.snapshotCollection.id, schema: { type: "object" }, fields: [expect.objectContaining({ name: "name" })] });
@@ -72,5 +80,30 @@ describe("discovery API", () => {
     expect(schema?.required).toEqual(expect.arrayContaining(["candidateIds", "approvedBy"]));
     expect(schema?.properties).toHaveProperty("crawlBudget");
     expect(operation?.responses).toHaveProperty("201");
+  });
+
+  it("processes source-registration discovery asynchronously and exposes its preview by source", async () => {
+    const delayedEngine = new DelayedWebsiteEngine();
+    const isolatedApp = await buildApp({ websiteConnector: new WebsiteConnector(delayedEngine), aiProvider: new FakeSchemaProvider() });
+    await isolatedApp.ready();
+    try {
+      const created = await isolatedApp.inject({ method: "POST", url: "/v1/sources", payload: { sourceType: "website", url: "https://example.test/" } });
+      expect(created.statusCode).toBe(201);
+      const source = JSON.parse(created.body) as { id: string };
+      await new Promise((resolve) => setImmediate(resolve));
+      const pending = await isolatedApp.inject({ method: "GET", url: `/v1/sources/${source.id}/discovery-preview` });
+      expect(pending.statusCode).toBe(404);
+
+      delayedEngine.complete();
+      let completed = await isolatedApp.inject({ method: "GET", url: `/v1/sources/${source.id}/discovery-preview` });
+      for (let attempt = 0; completed.statusCode === 404 && attempt < 10; attempt += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+        completed = await isolatedApp.inject({ method: "GET", url: `/v1/sources/${source.id}/discovery-preview` });
+      }
+      expect(completed.statusCode).toBe(200);
+      expect(JSON.parse(completed.body)).toMatchObject({ candidates: [expect.objectContaining({ name: "Delayed" })] });
+    } finally {
+      await isolatedApp.close();
+    }
   });
 });

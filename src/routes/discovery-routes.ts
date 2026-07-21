@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { ApplicationError } from "../core/errors.js";
-import { defaultDiscoveryLimits } from "../crawlers/website-crawler.js";
+import { defaultDiscoveryLimits } from "../models/discovery.js";
 import type { DiscoveryService } from "../services/discovery-service.js";
 
 export const discoveryRoutePrefix = "/v1/discoveries";
@@ -40,5 +40,13 @@ export function registerDiscoveryRoutes(app: FastifyInstance, service: Discovery
     if (parsed.data.candidateIds.some((id) => !preview.candidates.some((candidate) => candidate.candidateId === id))) throw new ApplicationError("invalid_request", "Selected candidates do not belong to this discovery result");
     const created = await service.approveAndCapture(parsed.data);
     return reply.code(201).send({ dataset: { id: created.dataset.id }, crawlPlan: { id: created.crawlPlan.id }, snapshotCollection: { id: created.snapshots.id } });
+  });
+}
+
+export function registerSourceDiscoveryPreviewRoute(app: FastifyInstance, service: DiscoveryService): void {
+  app.get("/v1/sources/:sourceId/discovery-preview", { schema: { tags: ["discovery"], summary: "Get the newest completed discovery preview for a source" } }, async (request: FastifyRequest<{ Params: { sourceId: string } }>) => {
+    const preview = await service.latestPreviewForSource(request.params.sourceId);
+    if (!preview) throw new ApplicationError("not_found", "No completed discovery preview exists for this source");
+    return preview;
   });
 }

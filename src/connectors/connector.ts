@@ -11,6 +11,7 @@ import type { SourceSnapshot } from "../models/snapshot.js";
 import type { CrawlPlan } from "../models/crawl.js";
 import type { DiscoveryLimits, DiscoveryResult } from "../models/discovery.js";
 import type { SnapshotCollection } from "../models/snapshot-collection.js";
+import type { CapturedPageArtifacts } from "../models/captured-page-artifacts.js";
 
 export interface ConnectorCapabilities {
   readonly supportsIncrementalSync: boolean;
@@ -22,7 +23,9 @@ export interface ConnectorCapabilities {
 export interface CapturedSource {
   readonly snapshot: SourceSnapshot;
   readonly content: string | Uint8Array;
+  readonly artifacts?: CapturedPageArtifacts;
 }
+
 
 export interface Connector {
   readonly sourceType: SourceType;

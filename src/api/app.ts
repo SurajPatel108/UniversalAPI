@@ -15,11 +15,13 @@ import { InMemorySourceRepository } from "../database/source-repository.js";
 import { SourceService } from "../services/source-service.js";
 import { registerSourcesRoutes } from "../routes/sources-routes.js";
 import { InMemoryDiscoveryRepository } from "../database/discovery-repository.js";
-import { WebsiteCrawler, type WebsiteHttpClient } from "../crawlers/website-crawler.js";
+import { createWebsiteConnector } from "../connectors/website-connector.js";
+import type { DatasetDiscoveryConnector } from "../connectors/connector.js";
 import { StructuralDatasetClassificationService } from "../ai/structural-dataset-classification-service.js";
 import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
 import { DiscoveryService } from "../services/discovery-service.js";
-import { registerDiscoveryRoutes } from "../routes/discovery-routes.js";
+import { registerDiscoveryRoutes, registerSourceDiscoveryPreviewRoute } from "../routes/discovery-routes.js";
+import { RefreshSourceWorker } from "../workers/refresh-source-worker.js";
 import type { AIProvider } from "../ai/providers/ai-provider.js";
 import { createConfiguredGeminiProvider } from "../ai/providers/gemini-provider.js";
 import { loadEnvironment, type Environment } from "../config/environment.js";
@@ -30,7 +32,7 @@ import { registerTestingRoutes } from "../routes/testing-routes.js";
 
 export interface ApiApplication extends FastifyInstance {}
 
-export interface BuildAppOptions { readonly websiteHttpClient?: WebsiteHttpClient; readonly datasetClassifier?: DatasetClassificationService; readonly aiProvider?: AIProvider | null; readonly environment?: Environment; }
+export interface BuildAppOptions { readonly websiteConnector?: DatasetDiscoveryConnector; readonly datasetClassifier?: DatasetClassificationService; readonly aiProvider?: AIProvider | null; readonly environment?: Environment; }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplication> {
   const app = Fastify({ logger: false });
@@ -70,8 +72,11 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplic
   const queue = new InMemoryJobQueue();
   const service = new SourceService(repository, queue);
   const discoveryRepository = new InMemoryDiscoveryRepository();
-  const discoveryService = new DiscoveryService(repository, discoveryRepository, new WebsiteCrawler(options.websiteHttpClient), options.datasetClassifier ?? new StructuralDatasetClassificationService());
   const environment = options.environment ?? loadEnvironment();
+  const websiteConnector = options.websiteConnector ?? createWebsiteConnector(environment.crawl4aiBaseUrl, environment.crawl4aiToken);
+  const discoveryService = new DiscoveryService(repository, discoveryRepository, websiteConnector, options.datasetClassifier ?? new StructuralDatasetClassificationService());
+  const refreshWorker = new RefreshSourceWorker(discoveryService);
+  queue.subscribeRefresh((job) => refreshWorker.process(job).then(() => undefined));
   const resolvedProvider = options.aiProvider === undefined ? createConfiguredGeminiProvider(environment) : options.aiProvider;
   const providerName = resolvedProvider?.name ?? "deterministic-fallback";
   const providerModel = resolvedProvider?.model ?? environment.aiModel ?? "deterministic-fallback";
@@ -81,6 +86,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplic
 
   registerSourcesRoutes(app, service);
   registerDiscoveryRoutes(app, discoveryService);
+  registerSourceDiscoveryPreviewRoute(app, discoveryService);
   registerSchemaRoutes(app, schemaService);
   registerTestingRoutes(app, {
     sourceService: service,

@@ -14,9 +14,17 @@ export interface JobQueue {
 
 export class InMemoryJobQueue implements JobQueue {
   readonly enqueued: RefreshSourceJob[] = [];
+  readonly failed: Array<{ job: RefreshSourceJob; error: unknown }> = [];
+  private refreshHandler: ((job: RefreshSourceJob) => Promise<void>) | null = null;
+
+  subscribeRefresh(handler: (job: RefreshSourceJob) => Promise<void>): void { this.refreshHandler = handler; }
 
   async enqueueRefresh(job: RefreshSourceJob): Promise<void> {
     this.enqueued.push(job);
+    if (this.refreshHandler) {
+      queueMicrotask(() => {
+        void this.refreshHandler?.(job).catch((error: unknown) => this.failed.push({ job, error }));
+      });
+    }
   }
 }
-

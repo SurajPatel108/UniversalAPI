@@ -6,6 +6,7 @@ import type { SnapshotCollection } from "../models/snapshot-collection.js";
 export interface DiscoveryRepository {
   saveResult(result: DiscoveryResult): Promise<void>;
   findResult(id: string): Promise<DiscoveryResult | null>;
+  findLatestResultForSource(sourceId: string): Promise<DiscoveryResult | null>;
   saveCandidates(candidates: readonly DatasetCandidate[]): Promise<void>;
   findCandidates(discoveryResultId: string): Promise<readonly DatasetCandidate[]>;
   findCandidate(id: string): Promise<DatasetCandidate | null>;
@@ -25,6 +26,7 @@ export class InMemoryDiscoveryRepository implements DiscoveryRepository {
 
   async saveResult(result: DiscoveryResult): Promise<void> { this.results.set(result.id, result); }
   async findResult(id: string): Promise<DiscoveryResult | null> { return this.results.get(id) ?? null; }
+  async findLatestResultForSource(sourceId: string): Promise<DiscoveryResult | null> { return [...this.results.values()].filter((result) => result.sourceId === sourceId).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null; }
   async saveCandidates(candidates: readonly DatasetCandidate[]): Promise<void> { candidates.forEach((candidate) => this.candidates.set(candidate.id, candidate)); }
   async findCandidates(discoveryResultId: string): Promise<readonly DatasetCandidate[]> { return [...this.candidates.values()].filter((candidate) => candidate.discoveryResultId === discoveryResultId); }
   async findCandidate(id: string): Promise<DatasetCandidate | null> { return this.candidates.get(id) ?? null; }

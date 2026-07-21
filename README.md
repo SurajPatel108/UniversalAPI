@@ -6,7 +6,7 @@ This repository is intentionally a **blueprint**, not a crawler implementation. 
 
 ## Architecture
 
-`src/api` owns transport concerns only. It delegates to application services in `src/services`, which coordinate domain contracts from `src/models` and infrastructure ports. `src/connectors` is the common boundary for websites, PDFs, spreadsheets, databases, Notion, and future sources. Starting in Phase 2, connectors support bounded discovery and planned collection capture. `src/ai` plans dataset schemas and extraction definitions; `src/parsers`, `src/extractors`, and `src/normalizers` execute and verify them deterministically across snapshot collections. `src/database`, `src/cache`, and `src/jobs` are adapters/ports; `src/workers` runs asynchronous work.
+`src/api` owns transport concerns only. It delegates to application services in `src/services`, which coordinate domain contracts from `src/models` and infrastructure ports. `src/connectors` is the common boundary for websites, PDFs, spreadsheets, databases, Notion, and future sources. The website connector uses Crawl4AI only as a private, configured acquisition engine; no other module depends on its types or wire format. Starting in Phase 2, connectors support bounded discovery and planned collection capture. `src/ai` plans dataset schemas and extraction definitions; `src/parsers`, `src/extractors`, and `src/normalizers` execute and verify them deterministically across snapshot collections. `src/database`, `src/cache`, and `src/jobs` are adapters/ports; `src/workers` runs asynchronous work.
 
 ```text
 HTTP route -> SourceService -> discovery job -> Worker

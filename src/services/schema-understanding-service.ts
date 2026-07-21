@@ -34,9 +34,11 @@ export class SchemaUnderstandingService {
     const samples = this.samples(collection);
     let proposed: { schema: { type: "object"; properties: Record<string, unknown>; required: string[] }; fields: Array<{ name: string; type: string; required: boolean; confidence: number; evidence: string }>; rationale: string; confidence: number };
     try {
-      proposed = this.provider ? proposalSchema.parse(await this.provider.generateStructured({ operation: "dataset_schema", prompt: "Infer only the requested JSON schema from the representative redacted samples. Return only the JSON object. Do not summarize data, explain the website, or write prose.", input: { snapshotCollectionId: collection.id, samples } })) : { schema: { type: "object" as const, properties: {}, required: [] }, fields: [], rationale: "No AI provider is configured; deterministic empty schema fallback.", confidence: 0 };
+      proposed = this.provider ? proposalSchema.parse(await this.provider.generateStructured({ operation: "dataset_schema", prompt: `Infer only the requested JSON schema from the representative redacted samples. Return only a JSON object matching this exact schema:\n{"schema":{"type":"object","properties":{},"required":[]},"fields":[{"name":"string","type":"string","required":true,"confidence":0.0,"evidence":"string"}],"rationale":"string","confidence":0.0}\nDo not summarize data, explain the website, or write prose.`, input: { snapshotCollectionId: collection.id, samples } })) : { schema: { type: "object" as const, properties: {}, required: [] }, fields: [], rationale: "No AI provider is configured; deterministic empty schema fallback.", confidence: 0 };
     } catch (error) {
-      proposed = { schema: { type: "object" as const, properties: {}, required: [] }, fields: [], rationale: error instanceof Error ? error.message : "AI provider request failed", confidence: 0 };
+      const message = error instanceof Error ? error.message : "AI provider request failed";
+      console.error("[schema-understanding] AI generation failed", { error: message });
+      throw new ApplicationError("internal_error", `Schema generation failed: ${message}`, true);
     }
     this.lastRunMetadata = {
       provider: this.provider?.name ?? "deterministic-fallback",

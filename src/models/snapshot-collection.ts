@@ -1,4 +1,5 @@
 import type { SourceSnapshot } from "./snapshot.js";
+import type { CapturedPageArtifacts } from "./captured-page-artifacts.js";
 
 export type SnapshotOutcome = "captured" | "failed" | "skipped" | "duplicate" | "out_of_scope";
 
@@ -8,6 +9,7 @@ export interface SnapshotCollectionEntry {
   readonly snapshot?: SourceSnapshot;
   /** Immutable captured content; production storage adapters may replace this with an object-storage reference. */
   readonly content?: string;
+  readonly artifacts?: CapturedPageArtifacts;
   readonly error?: string;
 }
 

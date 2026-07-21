@@ -1,5 +1,5 @@
 import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
-import type { WebsiteCrawler } from "../crawlers/website-crawler.js";
+import type { DatasetDiscoveryConnector } from "../connectors/connector.js";
 import { ApplicationError } from "../core/errors.js";
 import { generateUuid } from "../core/uuid.js";
 import type { DiscoveryRepository } from "../database/discovery-repository.js";
@@ -10,11 +10,11 @@ import type { DiscoveryLimits, DiscoveryPreview, DiscoveryResult } from "../mode
 import type { SnapshotCollection } from "../models/snapshot-collection.js";
 
 export class DiscoveryService {
-  constructor(private readonly sources: SourceRepository, private readonly repository: DiscoveryRepository, private readonly crawler: WebsiteCrawler, private readonly classifier: DatasetClassificationService) {}
+  constructor(private readonly sources: SourceRepository, private readonly repository: DiscoveryRepository, private readonly connector: DatasetDiscoveryConnector, private readonly classifier: DatasetClassificationService) {}
 
   async discover(sourceId: string, limits: DiscoveryLimits): Promise<DiscoveryPreview> {
     const source = await this.requireWebsite(sourceId);
-    const result = await this.crawler.discover(source, limits);
+    const result = await this.connector.discover(source, limits);
     await this.repository.saveResult(result);
     const candidates = await this.classifier.classify(result);
     if (candidates.some((candidate) => candidate.sourceId !== sourceId || candidate.discoveryResultId !== result.id)) throw new ApplicationError("invalid_candidate", "Classifier returned candidates for another source or discovery result");
@@ -25,6 +25,19 @@ export class DiscoveryService {
   async preview(discoveryResultId: string): Promise<DiscoveryPreview> {
     const result = await this.requireResult(discoveryResultId);
     return this.buildPreview(result, await this.repository.findCandidates(discoveryResultId));
+  }
+
+  async latestPreviewForSource(sourceId: string): Promise<DiscoveryPreview | null> {
+    const result = await this.repository.findLatestResultForSource(sourceId);
+    return result ? this.buildPreview(result, await this.repository.findCandidates(result.id)) : null;
+  }
+
+  /** Read-only source-neutral acquisition evidence for development diagnostics. */
+  async acquisitionDiagnostics(discoveryResultId: string): Promise<readonly { readonly url: string; readonly stage: "Acquisition"; readonly reason: string }[]> {
+    const result = await this.requireResult(discoveryResultId);
+    return result.pages
+      .filter((page) => page.disposition === "failed")
+      .map((page) => ({ url: page.canonicalUrl, stage: "Acquisition" as const, reason: page.reason ?? "Acquisition failed" }));
   }
 
   async approveAndCapture(input: { readonly candidateIds: readonly string[]; readonly approvedBy: string; readonly scope?: readonly string[]; readonly crawlBudget?: Partial<Pick<DiscoveryLimits, "maxPages" | "maxDepth" | "maxBytesPerPage" | "timeoutMs" | "maxRedirects">> }): Promise<{ readonly dataset: Dataset; readonly crawlPlan: CrawlPlan; readonly snapshots: SnapshotCollection }> {
@@ -48,7 +61,7 @@ export class DiscoveryService {
     const plan: CrawlPlan = { id: generateUuid(), datasetId: dataset.id, revision: 1, urls: scope, limits, createdAt: now };
     await this.repository.saveDataset(dataset);
     await this.repository.saveCrawlPlan(plan);
-    const snapshots = await this.crawler.capturePlan(source, plan);
+    const snapshots = await this.connector.capturePlan(source, plan);
     await this.repository.saveSnapshotCollection(snapshots);
     return { dataset, crawlPlan: plan, snapshots };
   }

@@ -9,6 +9,8 @@ export interface DiscoveryLimits {
   readonly allowedOrigins: readonly string[];
 }
 
+export const defaultDiscoveryLimits: DiscoveryLimits = { maxPages: 100, maxDepth: 3, maxBytesPerPage: 1_000_000, timeoutMs: 10_000, maxRedirects: 5, allowedOrigins: [] };
+
 export type DiscoveryDisposition = "captured" | "duplicate" | "out_of_scope" | "failed" | "limit_reached";
 
 export interface DiscoveredPage {
