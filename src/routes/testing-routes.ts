@@ -14,6 +14,7 @@ import type { DiscoveryService } from "../services/discovery-service.js";
 import type { SchemaUnderstandingService } from "../services/schema-understanding-service.js";
 import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
 import { defaultDiscoveryLimits } from "../models/discovery.js";
+import type { DevelopmentPhase4WorkflowResult, DevelopmentPhase4WorkflowService } from "../services/development-phase4-workflow-service.js";
 
 const runPayloadSchema = z.object({
   url: z.string().url(),
@@ -46,6 +47,7 @@ export interface TestingDashboardRunResult {
   readonly logs: readonly string[];
   readonly acquisitionDiagnostics: readonly { readonly url: string; readonly stage: "Acquisition"; readonly reason: string }[];
   readonly error: string | null;
+  readonly phase4: DevelopmentPhase4WorkflowResult | null;
   readonly schemaPreview: {
     readonly fields: Array<{ readonly name: string; readonly type: string; readonly required: boolean; readonly confidence: number; readonly evidence: string }>;
     readonly rationale: string;
@@ -53,7 +55,7 @@ export interface TestingDashboardRunResult {
   } | null;
 }
 
-export function registerTestingRoutes(app: FastifyInstance, deps: { sourceService: SourceService; discoveryService: DiscoveryService; schemaService: SchemaUnderstandingService; classifier: DatasetClassificationService; providerName: string; providerModel: string; tokenUsage?: number | null; environment: { nodeEnv: string } }): void {
+export function registerTestingRoutes(app: FastifyInstance, deps: { sourceService: SourceService; discoveryService: DiscoveryService; schemaService: SchemaUnderstandingService; phase4Workflow: DevelopmentPhase4WorkflowService; classifier: DatasetClassificationService; providerName: string; providerModel: string; tokenUsage?: number | null; environment: { nodeEnv: string } }): void {
   app.get("/testing", async (_request, reply) => {
     if (deps.environment.nodeEnv !== "development") {
       throw new ApplicationError("not_found", "Testing dashboard is only available in development", false);
@@ -107,12 +109,17 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       <h2>Schema Preview</h2>
       <div id="schema-preview"></div>
     </div>
+    <div class="card">
+      <h2>Phase 4 Extraction</h2>
+      <div id="phase4-preview">No extraction plan or evaluation available.</div>
+    </div>
     <script>
       const runButton = document.getElementById('run');
       const logEl = document.getElementById('log');
       const summaryEl = document.getElementById('summary');
       const errorEl = document.getElementById('error-banner');
       const schemaPreviewEl = document.getElementById('schema-preview');
+      const phase4PreviewEl = document.getElementById('phase4-preview');
       const appendLog = (message) => {
         if (!message) {
           return;
@@ -123,10 +130,12 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         runButton.disabled = isRunning;
         runButton.textContent = isRunning ? 'Running...' : 'Run Pipeline';
       };
-      const renderError = (errorMessage, acquisitionDiagnostics) => {
+      const renderError = (errorMessage, acquisitionDiagnostics, planValidationDiagnostics) => {
         const diagnostics = Array.isArray(acquisitionDiagnostics) ? acquisitionDiagnostics : [];
         const diagnosticText = diagnostics.map((diagnostic) => diagnostic.stage + ' failed for ' + diagnostic.url + ': ' + diagnostic.reason).join('\n');
-        const combined = [errorMessage, diagnosticText].filter(Boolean).join('\n');
+        const validationDiagnostics = Array.isArray(planValidationDiagnostics) ? planValidationDiagnostics : [];
+        const validationText = validationDiagnostics.map((diagnostic) => '[' + diagnostic.validationRuleId + '] ' + diagnostic.explanation + ' Suggested correction: ' + diagnostic.suggestedCorrection).join('\n');
+        const combined = [errorMessage, diagnosticText, validationText].filter(Boolean).join('\n');
         if (!combined) {
           errorEl.innerHTML = '<div>No errors.</div>';
           return;
@@ -162,13 +171,27 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         const rows = preview.fields.map((field) => '<tr><td>' + field.name + '</td><td>' + field.type + '</td><td>' + (field.required ? '✓' : '✗') + '</td><td>' + field.confidence.toFixed(2) + '</td></tr>').join('');
         schemaPreviewEl.innerHTML = '<div style="margin-bottom: 0.75rem;">' + (preview.rationale || '') + '</div><table style="width: 100%; border-collapse: collapse;"><thead><tr><th align="left">Field</th><th align="left">Type</th><th align="left">Required</th><th align="left">Confidence</th></tr></thead><tbody>' + rows + '</tbody></table>';
       };
+      const renderPhase4 = (phase4) => {
+        if (!phase4) { phase4PreviewEl.innerHTML = '<div>No extraction plan or evaluation available.</div>'; return; }
+        const approval = phase4.schemaApproval ? 'AUTO_APPROVED · schema ' + phase4.schemaApproval.schemaVersion + ' · ' + phase4.schemaApproval.createdAt + '<br/>Reason: ' + (phase4.schemaApproval.deterministicGateEvidence || []).join(', ') + '<br/>' + (phase4.approvalDiagnostics || []).join('<br/>') : (phase4.approvalDiagnostics || []).join('<br/>');
+        const plan = phase4.plan ? 'Plan: ' + phase4.plan.planId + ' · revision ' + phase4.plan.revision + '<br/>Cache: ' + phase4.plan.generationCacheKey + '<br/>Provider: ' + phase4.plan.provenance.provider + ' / ' + phase4.plan.provenance.model + '<br/>Prompt: ' + phase4.plan.provenance.promptVersion + ' · Sampling: ' + phase4.plan.provenance.samplingVersion + ' · Preprocessing: ' + phase4.plan.provenance.preprocessingVersion : 'Plan not generated.';
+        const metrics = phase4.result ? phase4.result.metrics : null;
+        const execution = metrics ? 'Snapshots/pages processed: ' + metrics.pagesProcessed + '<br/>Records: ' + metrics.recordsExtracted + ' · Fields: ' + metrics.fieldsExtracted + ' · Duplicates removed: ' + metrics.duplicatesRemoved + '<br/>Coverage: ' + metrics.pageCoveragePercent + '% · Required fields: ' + metrics.requiredFieldCompletenessPercent + '%<br/>Replay fingerprint: ' + phase4.result.replayFingerprint : 'Execution not completed.';
+        const evaluation = phase4.evaluation ? 'Evaluation: <strong>' + phase4.evaluation.outcome + '</strong><br/>Duplicate rate: ' + phase4.evaluation.metrics.duplicatePercent + '% · Schema conformance failures: ' + phase4.evaluation.metrics.schemaInvalidRecords + '<br/>Quality metrics: selector failures ' + phase4.evaluation.metrics.selectorFailures + ' · normalization failures ' + phase4.evaluation.metrics.normalizationFailures : 'Evaluation not available.';
+        const records = phase4.result ? '<pre>' + JSON.stringify(phase4.result.records, null, 2) + '</pre>' : '';
+        const diagnostics = (phase4.diagnostics || []).map((diagnostic) => diagnostic.scope + ' ' + diagnostic.code + ': ' + diagnostic.message).join('<br/>');
+        const validationDiagnostics = (phase4.planValidationDiagnostics || []).map((diagnostic) => '<li><strong>[' + diagnostic.validationRuleId + ']</strong> ' + diagnostic.explanation + '<br/><small>Category: ' + diagnostic.category + ' · Severity: ' + diagnostic.severity + (diagnostic.field ? ' · Field: ' + diagnostic.field : '') + (diagnostic.selector ? ' · Selector: ' + diagnostic.selector : '') + (diagnostic.affectedRule ? ' · Rule: ' + diagnostic.affectedRule : '') + (diagnostic.evidenceReference ? ' · Evidence: ' + diagnostic.evidenceReference : '') + '<br/>Suggested correction: ' + diagnostic.suggestedCorrection + '</small></li>').join('');
+        const validation = validationDiagnostics ? '<strong>FAIL</strong><ul>' + validationDiagnostics + '</ul>' : 'No extraction-plan validation failures.';
+        phase4PreviewEl.innerHTML = '<h3>Schema Approval</h3><div>' + approval + '</div><h3>Extraction Plan</h3><div>' + plan + '</div><h3>Extraction Plan Validation</h3><div>' + validation + '</div><h3>Execution</h3><div>' + execution + '</div><h3>Evaluation</h3><div>' + evaluation + '</div><h3>Diagnostics</h3><div>' + (diagnostics || phase4.error || 'None') + '</div><h3>Record Preview</h3>' + records;
+      };
       runButton.addEventListener('click', async () => {
         setRunningState(true);
         logEl.textContent = '';
         appendLog('Starting…');
         renderSummary({ elapsedMs: 0, discoveredDatasets: 0, datasetId: 'n/a', pagesCrawled: 0, snapshotsCaptured: 0, schemaFields: 0, provider: 'n/a', model: 'n/a', promptTokens: 0, completionTokens: 0, totalTokens: 0, generatedIds: [] });
-        renderError(null);
+        renderError(null, [], []);
         renderSchemaPreview(null);
+        renderPhase4(null);
         try {
           const response = await fetch('/testing/run', {
             method: 'POST',
@@ -199,8 +222,9 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
           const logLines = Array.isArray(payload.logs) ? payload.logs : [];
           logEl.textContent = logLines.join('\n');
           renderSummary(payload);
-          renderError(payload.error || null, payload.acquisitionDiagnostics);
+          renderError(payload.error || payload.phase4?.error || null, payload.acquisitionDiagnostics, payload.phase4?.planValidationDiagnostics);
           renderSchemaPreview(payload.schemaPreview);
+          renderPhase4(payload.phase4);
         } catch (error) {
           appendLog(error instanceof Error ? error.message : String(error));
         } finally {
@@ -262,6 +286,7 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       let pagesCrawled = 0;
       let snapshotsCaptured = 0;
       let schemaFields = 0;
+      let phase4: DevelopmentPhase4WorkflowResult | null = null;
 
       if (steps.discovery) {
         const preview = await deps.discoveryService.discover(source.id, { ...defaultDiscoveryLimits, maxPages: 10, maxDepth: 2, allowedOrigins: [] });
@@ -299,6 +324,19 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         schemaFields = schema.fields.length;
         generatedIds.push(schema.id);
         logs.push(`Schema generation completed with ${schema.fields.length} field(s)`);
+        phase4 = await deps.phase4Workflow.run(schema.datasetId, schema.snapshotCollectionId);
+        logs.push("Schema Approval completed.");
+        phase4.approvalDiagnostics.forEach((diagnostic) => logs.push(`Schema Approval: ${diagnostic}`));
+        if (phase4.plan) logs.push(`Extraction Plan generated: ${phase4.plan.planId}`);
+        else logs.push("Extraction Plan skipped.");
+        if (phase4.planValidationDiagnostics.length > 0) {
+          logs.push(`Extraction Plan Validation failed with ${phase4.planValidationDiagnostics.length} error(s).`);
+          phase4.planValidationDiagnostics.forEach((diagnostic) => logs.push(`Extraction Plan Validation [${diagnostic.validationRuleId}]: ${diagnostic.explanation} Suggested correction: ${diagnostic.suggestedCorrection}`));
+        }
+        if (phase4.result) logs.push(`Extraction Execution completed with ${phase4.result.metrics.recordsExtracted} record(s).`);
+        else logs.push("Extraction Execution skipped.");
+        if (phase4.evaluation) logs.push(`Evaluation completed: ${phase4.evaluation.outcome}.`);
+        if (phase4.error) logs.push(`Phase 4: ${phase4.error}`);
       }
 
       const schemaRunMetadata = deps.schemaService.getLastRunMetadata?.() ?? null;
@@ -324,6 +362,7 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         logs,
         acquisitionDiagnostics,
         error: errorMessage,
+        phase4,
         schemaPreview: schemaRunMetadata?.schemaPreview ?? null
       } satisfies TestingDashboardRunResult);
     } catch (error) {
@@ -351,6 +390,7 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         logs,
         acquisitionDiagnostics: [],
         error: errorMessage,
+        phase4: null,
         schemaPreview: schemaRunMetadata?.schemaPreview ?? null
       } satisfies TestingDashboardRunResult);
     }

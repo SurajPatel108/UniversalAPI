@@ -1,5 +1,5 @@
 export interface StructuredGenerationRequest {
-  readonly operation: "dataset_schema";
+  readonly operation: "dataset_schema" | "extraction_plan";
   readonly prompt: string;
   readonly input: unknown;
 }

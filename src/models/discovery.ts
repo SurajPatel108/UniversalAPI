@@ -13,6 +13,18 @@ export const defaultDiscoveryLimits: DiscoveryLimits = { maxPages: 100, maxDepth
 
 export type DiscoveryDisposition = "captured" | "duplicate" | "out_of_scope" | "failed" | "limit_reached";
 
+/**
+ * Optional deterministic page signals retained by discovery for structural
+ * classification. They are observations, not a user-selected dataset scope.
+ */
+export interface DiscoveredPageStructure {
+  readonly mainRecordCandidates: number;
+  readonly mainLinkCount: number;
+  readonly navigationLinkCount: number;
+  readonly paginationLinkCount: number;
+  readonly mainHeading: string | null;
+}
+
 export interface DiscoveredPage {
   readonly url: string;
   readonly canonicalUrl: string;
@@ -22,6 +34,7 @@ export interface DiscoveredPage {
   readonly title: string | null;
   readonly contentType: string | null;
   readonly disposition: DiscoveryDisposition;
+  readonly structure?: DiscoveredPageStructure;
   readonly reason?: string;
 }
 

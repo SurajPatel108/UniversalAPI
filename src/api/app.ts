@@ -29,6 +29,11 @@ import { InMemorySchemaRepository } from "../database/schema-repository.js";
 import { SchemaUnderstandingService } from "../services/schema-understanding-service.js";
 import { registerSchemaRoutes } from "../routes/schema-routes.js";
 import { registerTestingRoutes } from "../routes/testing-routes.js";
+import { InMemoryExtractionRepository } from "../database/extraction-repository.js";
+import { SchemaApprovalService } from "../services/schema-approval-service.js";
+import { ExtractionPlanGenerationService } from "../services/extraction-plan-generation-service.js";
+import { ExtractionExecutionService } from "../services/extraction-execution-service.js";
+import { DevelopmentPhase4WorkflowService } from "../services/development-phase4-workflow-service.js";
 
 export interface ApiApplication extends FastifyInstance {}
 
@@ -80,7 +85,14 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplic
   const resolvedProvider = options.aiProvider === undefined ? createConfiguredGeminiProvider(environment) : options.aiProvider;
   const providerName = resolvedProvider?.name ?? "deterministic-fallback";
   const providerModel = resolvedProvider?.model ?? environment.aiModel ?? "deterministic-fallback";
-  const schemaService = new SchemaUnderstandingService(discoveryRepository, new InMemorySchemaRepository(), resolvedProvider);
+  const schemaRepository = new InMemorySchemaRepository();
+  const extractionRepository = new InMemoryExtractionRepository();
+  const schemaService = new SchemaUnderstandingService(discoveryRepository, schemaRepository, resolvedProvider);
+  const phase4Workflow = new DevelopmentPhase4WorkflowService(
+    new SchemaApprovalService(schemaRepository),
+    new ExtractionPlanGenerationService(discoveryRepository, schemaRepository, extractionRepository, resolvedProvider),
+    new ExtractionExecutionService(discoveryRepository, schemaRepository, extractionRepository)
+  );
 
   app.log.info({ geminiEnabled: providerName === "gemini", selectedProvider: providerName, selectedModel: providerModel }, "AI provider configuration");
 
@@ -92,6 +104,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<ApiApplic
     sourceService: service,
     discoveryService,
     schemaService,
+    phase4Workflow,
     classifier: options.datasetClassifier ?? new StructuralDatasetClassificationService(),
     providerName,
     providerModel,

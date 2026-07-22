@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AIProvider, StructuredGenerationRequest } from "../../src/ai/providers/ai-provider.js";
 import { createConfiguredGeminiProvider } from "../../src/ai/providers/gemini-provider.js";
@@ -43,7 +45,7 @@ describe("SchemaUnderstandingService", () => {
     await expect(new SchemaUnderstandingService(discoveries, new InMemorySchemaRepository(), failingProvider).analyze("collection-3")).rejects.toThrow("Gemini auth failed");
   });
 
-  it("uses only bounded redacted samples and caches a collection revision", async () => {
+  it("uses only bounded semantic content, labels metadata as non-schema context, and caches a collection revision", async () => {
     const discoveries = new InMemoryDiscoveryRepository();
     await discoveries.saveSnapshotCollection({ id: "collection-1", sourceId: "source-1", datasetId: "dataset-1", crawlPlanId: "plan-1", completed: true, createdAt: new Date(), entries: [
       { url: "https://example.test/one", outcome: "captured", content: '<script>secret()</script>alice@example.test +1 555 123 4567 <h1>One</h1>', snapshot: { id: "snapshot-1", sourceId: "source-1", contentType: "text/html", fingerprint: "a", capturedAt: new Date() } },
@@ -58,11 +60,48 @@ describe("SchemaUnderstandingService", () => {
 
     expect(first.id).toBe(second.id);
     expect(provider.calls).toHaveLength(1);
-    const samples = (provider.calls[0]?.input as { samples: Array<{ excerpt: string }> }).samples;
-    expect(samples).toHaveLength(3);
-    expect(samples[0]?.excerpt).toContain("[REDACTED_EMAIL]");
-    expect(samples[0]?.excerpt).toContain("[REDACTED_PHONE]");
-    expect(samples[0]?.excerpt).not.toContain("secret()");
+    const input = provider.calls[0]?.input as {
+      semanticPageContent: string[];
+      nonSchemaMetadata: { snapshotCollectionId: string; sampleEvidence: Array<{ evidenceReference: string; snapshotId: string; sourcePageUrl: string }> };
+    };
+    expect(input.semanticPageContent).toHaveLength(3);
+    expect(input.semanticPageContent[0]).toContain("[REDACTED_EMAIL]");
+    expect(input.semanticPageContent[0]).toContain("[REDACTED_PHONE]");
+    expect(input.semanticPageContent[0]).not.toContain("secret()");
+    expect(input.semanticPageContent[0]).not.toContain("snapshot-1");
+    expect(input.nonSchemaMetadata).toEqual({ snapshotCollectionId: "collection-1", sampleEvidence: [{ evidenceReference: "snapshot:snapshot-1", snapshotId: "snapshot-1", sourcePageUrl: "https://example.test/one" }, { evidenceReference: "snapshot:snapshot-2", snapshotId: "snapshot-2", sourcePageUrl: "https://example.test/two" }, { evidenceReference: "snapshot:snapshot-3", snapshotId: "snapshot-3", sourcePageUrl: "https://example.test/three" }] });
+    expect(provider.calls[0]?.prompt).toContain("Use only semanticPageContent");
+    expect(provider.calls[0]?.prompt).toContain("nonSchemaMetadata is transport");
+  });
+
+  it("keeps semantic catalog content separate from evidence transport metadata", async () => {
+    const content = await readFile(join(process.cwd(), "tests/fixtures/schema-understanding/product-catalog.html"), "utf8");
+    const discoveries = new InMemoryDiscoveryRepository();
+    await discoveries.saveSnapshotCollection({ id: "collection-catalog", sourceId: "source-1", datasetId: "dataset-1", crawlPlanId: "plan-1", completed: true, createdAt: new Date(), entries: [{ url: "https://example.test/products/trail-lantern", outcome: "captured", content, snapshot: { id: "snapshot-catalog", sourceId: "source-1", contentType: "text/html", fingerprint: "catalog", capturedAt: new Date() } }] });
+    const provider = new FakeProvider();
+
+    await new SchemaUnderstandingService(discoveries, new InMemorySchemaRepository(), provider).analyze("collection-catalog");
+
+    const input = provider.calls[0]?.input as { semanticPageContent: string[]; nonSchemaMetadata: { sampleEvidence: Array<{ sourcePageUrl: string }> } };
+    expect(input.semanticPageContent).toEqual(["Product catalog Trail Lantern $29.99 In stock"]);
+    expect(input.semanticPageContent.join(" ")).not.toContain("https://example.test");
+    expect(input.nonSchemaMetadata.sampleEvidence[0]?.sourcePageUrl).toBe("https://example.test/products/trail-lantern");
+  });
+
+  it("rejects proposed reserved metadata fields before persistence", async () => {
+    const discoveries = new InMemoryDiscoveryRepository();
+    const schemas = new InMemorySchemaRepository();
+    await discoveries.saveSnapshotCollection({ id: "collection-reserved", sourceId: "source-1", datasetId: "dataset-1", crawlPlanId: "plan-1", completed: true, createdAt: new Date(), entries: [{ url: "https://example.test/items", outcome: "captured", content: "Catalog item", snapshot: { id: "snapshot-reserved", sourceId: "source-1", contentType: "text/html", fingerprint: "reserved", capturedAt: new Date() } }] });
+    const provider: AIProvider = {
+      name: "fake",
+      model: "fake-model",
+      async generateStructured() {
+        return { schema: { type: "object", properties: { snapshotCollectionId: { type: "string" }, title: { type: "string" } }, required: ["snapshotCollectionId", "title"] }, fields: [{ name: "snapshotCollectionId", type: "string", required: true, confidence: 1, evidence: "snapshot:snapshot-reserved" }, { name: "title", type: "string", required: true, confidence: 1, evidence: "snapshot:snapshot-reserved" }], rationale: "Incorrectly used transport metadata", confidence: 1 };
+      }
+    };
+
+    await expect(new SchemaUnderstandingService(discoveries, schemas, provider).analyze("collection-reserved")).rejects.toThrow("reserved metadata field(s): snapshotCollectionId");
+    expect(await schemas.findLatestForDatasetAndCollection("dataset-1", "collection-reserved")).toBeNull();
   });
 
   it("returns a deterministic valid schema when no provider is configured", async () => {
