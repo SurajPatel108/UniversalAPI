@@ -11,7 +11,7 @@ import { z } from "zod";
 import { ApplicationError } from "../core/errors.js";
 import type { SourceService } from "../services/source-service.js";
 import type { DiscoveryService } from "../services/discovery-service.js";
-import type { SchemaUnderstandingService } from "../services/schema-understanding-service.js";
+import type { SchemaGenerationFailureDiagnostic, SchemaUnderstandingService } from "../services/schema-understanding-service.js";
 import type { DatasetClassificationService } from "../ai/dataset-classification-service.js";
 import { defaultDiscoveryLimits } from "../models/discovery.js";
 import type { DevelopmentPhase4WorkflowResult, DevelopmentPhase4WorkflowService } from "../services/development-phase4-workflow-service.js";
@@ -25,6 +25,9 @@ const runPayloadSchema = z.object({
     schema: z.boolean().default(false)
   }).default({ discovery: false, approval: false, snapshotCapture: false, schema: false })
 });
+const dashboardDiscoveryLimits = { ...defaultDiscoveryLimits, maxPages: 10, maxDepth: 2, allowedOrigins: [] };
+
+type DashboardCandidate = { readonly candidateId: string; readonly name: string; readonly classification: string; readonly estimatedPageCount: number; readonly estimatedRecordCount: number | null; readonly estimatedCrawlSeconds: number; readonly confidence: number; readonly representativeUrls: readonly string[]; readonly knownRisks: readonly string[] };
 
 export interface TestingDashboardRunResult {
   readonly elapsedMs: number;
@@ -35,6 +38,8 @@ export interface TestingDashboardRunResult {
   readonly snapshotCollectionId: string | null;
   readonly schemaId: string | null;
   readonly discoveredDatasets: number;
+  readonly candidates: readonly DashboardCandidate[];
+  readonly autoSelectedCandidate: DashboardCandidate | null;
   readonly pagesCrawled: number;
   readonly snapshotsCaptured: number;
   readonly schemaFields: number;
@@ -48,6 +53,8 @@ export interface TestingDashboardRunResult {
   readonly acquisitionDiagnostics: readonly { readonly url: string; readonly stage: "Acquisition"; readonly reason: string }[];
   readonly error: string | null;
   readonly phase4: DevelopmentPhase4WorkflowResult | null;
+  /** Development-only, transient provider diagnostics for a failed schema generation attempt. */
+  readonly schemaGenerationDiagnostic: SchemaGenerationFailureDiagnostic | null;
   readonly schemaPreview: {
     readonly fields: Array<{ readonly name: string; readonly type: string; readonly required: boolean; readonly confidence: number; readonly evidence: string }>;
     readonly rationale: string;
@@ -102,12 +109,20 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       <div id="summary" class="summary"></div>
     </div>
     <div class="card">
+      <h2>Discovery Candidates</h2>
+      <div id="candidate-preview">No discovery candidates available.</div>
+    </div>
+    <div class="card">
       <h2>Errors</h2>
       <div id="error-banner">No errors.</div>
     </div>
     <div class="card">
       <h2>Schema Preview</h2>
       <div id="schema-preview"></div>
+    </div>
+    <div class="card">
+      <h2>Schema Generation Diagnostics</h2>
+      <div id="schema-diagnostic">No schema-generation diagnostics.</div>
     </div>
     <div class="card">
       <h2>Phase 4 Extraction</h2>
@@ -119,7 +134,9 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       const summaryEl = document.getElementById('summary');
       const errorEl = document.getElementById('error-banner');
       const schemaPreviewEl = document.getElementById('schema-preview');
+      const schemaDiagnosticEl = document.getElementById('schema-diagnostic');
       const phase4PreviewEl = document.getElementById('phase4-preview');
+      const candidatePreviewEl = document.getElementById('candidate-preview');
       const appendLog = (message) => {
         if (!message) {
           return;
@@ -130,17 +147,23 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         runButton.disabled = isRunning;
         runButton.textContent = isRunning ? 'Running...' : 'Run Pipeline';
       };
-      const renderError = (errorMessage, acquisitionDiagnostics, planValidationDiagnostics) => {
+      const escapeHtml = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      const renderError = (errorMessage, acquisitionDiagnostics, planValidationDiagnostics, evaluationReasons) => {
         const diagnostics = Array.isArray(acquisitionDiagnostics) ? acquisitionDiagnostics : [];
         const diagnosticText = diagnostics.map((diagnostic) => diagnostic.stage + ' failed for ' + diagnostic.url + ': ' + diagnostic.reason).join('\n');
         const validationDiagnostics = Array.isArray(planValidationDiagnostics) ? planValidationDiagnostics : [];
         const validationText = validationDiagnostics.map((diagnostic) => '[' + diagnostic.validationRuleId + '] ' + diagnostic.explanation + ' Suggested correction: ' + diagnostic.suggestedCorrection).join('\n');
-        const combined = [errorMessage, diagnosticText, validationText].filter(Boolean).join('\n');
+        const evaluationText = Array.isArray(evaluationReasons) ? evaluationReasons.map((reason) => '[' + reason.code + '] ' + reason.message + ' Recommendation: ' + reason.recommendation).join('\n') : '';
+        const combined = [errorMessage, diagnosticText, validationText, evaluationText].filter(Boolean).join('\n');
         if (!combined) {
           errorEl.innerHTML = '<div>No errors.</div>';
           return;
         }
         errorEl.innerHTML = '<div style="color: #fda4af; white-space: pre-wrap;">' + combined + '</div>';
+      };
+      const renderCandidates = (candidates, selected) => {
+        if (!Array.isArray(candidates) || candidates.length === 0) { candidatePreviewEl.innerHTML = '<div>No discovery candidates available.</div>'; return; }
+        candidatePreviewEl.innerHTML = candidates.map((candidate) => '<div class="item" style="margin-bottom: 0.5rem;">' + (selected && candidate.candidateId === selected.candidateId ? '<strong>Auto-selected · </strong>' : '') + '<strong>' + candidate.name + '</strong> · ' + candidate.classification + '<br/>~' + candidate.estimatedPageCount + ' pages · ~' + (candidate.estimatedRecordCount ?? 'unknown') + ' records · confidence ' + Number(candidate.confidence).toFixed(2) + '<br/>' + (candidate.knownRisks || []).join('; ') + '</div>').join('');
       };
       const renderSummary = (summary) => {
         const items = [
@@ -171,15 +194,35 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         const rows = preview.fields.map((field) => '<tr><td>' + field.name + '</td><td>' + field.type + '</td><td>' + (field.required ? '✓' : '✗') + '</td><td>' + field.confidence.toFixed(2) + '</td></tr>').join('');
         schemaPreviewEl.innerHTML = '<div style="margin-bottom: 0.75rem;">' + (preview.rationale || '') + '</div><table style="width: 100%; border-collapse: collapse;"><thead><tr><th align="left">Field</th><th align="left">Type</th><th align="left">Required</th><th align="left">Confidence</th></tr></thead><tbody>' + rows + '</tbody></table>';
       };
+      const renderSchemaDiagnostic = (diagnostic) => {
+        if (!diagnostic) {
+          schemaDiagnosticEl.innerHTML = '<div>No schema-generation diagnostics.</div>';
+          return;
+        }
+        const details = [
+          ['Stage', diagnostic.stage],
+          ['Provider', diagnostic.provider + ' / ' + diagnostic.model],
+          ['Failure type', diagnostic.failureType],
+          ['Parser error', diagnostic.parserError || 'n/a'],
+          ['Response length', diagnostic.responseLength],
+          ['Prompt version', diagnostic.promptVersion || 'n/a'],
+          ['Finish reason', diagnostic.finishReason || 'n/a']
+        ];
+        const raw = diagnostic.rawResponse === null ? 'No provider response body was available.' : diagnostic.rawResponse;
+        schemaDiagnosticEl.innerHTML = details.map(([label, value]) => '<div><strong>' + escapeHtml(label) + '</strong>: ' + escapeHtml(value) + '</div>').join('') + '<h3>Raw Provider Response</h3><pre>' + escapeHtml(raw) + '</pre>';
+      };
       const renderPhase4 = (phase4) => {
         if (!phase4) { phase4PreviewEl.innerHTML = '<div>No extraction plan or evaluation available.</div>'; return; }
         const approval = phase4.schemaApproval ? 'AUTO_APPROVED · schema ' + phase4.schemaApproval.schemaVersion + ' · ' + phase4.schemaApproval.createdAt + '<br/>Reason: ' + (phase4.schemaApproval.deterministicGateEvidence || []).join(', ') + '<br/>' + (phase4.approvalDiagnostics || []).join('<br/>') : (phase4.approvalDiagnostics || []).join('<br/>');
         const plan = phase4.plan ? 'Plan: ' + phase4.plan.planId + ' · revision ' + phase4.plan.revision + '<br/>Cache: ' + phase4.plan.generationCacheKey + '<br/>Provider: ' + phase4.plan.provenance.provider + ' / ' + phase4.plan.provenance.model + '<br/>Prompt: ' + phase4.plan.provenance.promptVersion + ' · Sampling: ' + phase4.plan.provenance.samplingVersion + ' · Preprocessing: ' + phase4.plan.provenance.preprocessingVersion : 'Plan not generated.';
         const metrics = phase4.result ? phase4.result.metrics : null;
         const execution = metrics ? 'Snapshots/pages processed: ' + metrics.pagesProcessed + '<br/>Records: ' + metrics.recordsExtracted + ' · Fields: ' + metrics.fieldsExtracted + ' · Duplicates removed: ' + metrics.duplicatesRemoved + '<br/>Coverage: ' + metrics.pageCoveragePercent + '% · Required fields: ' + metrics.requiredFieldCompletenessPercent + '%<br/>Replay fingerprint: ' + phase4.result.replayFingerprint : 'Execution not completed.';
-        const evaluation = phase4.evaluation ? 'Evaluation: <strong>' + phase4.evaluation.outcome + '</strong><br/>Duplicate rate: ' + phase4.evaluation.metrics.duplicatePercent + '% · Schema conformance failures: ' + phase4.evaluation.metrics.schemaInvalidRecords + '<br/>Quality metrics: selector failures ' + phase4.evaluation.metrics.selectorFailures + ' · normalization failures ' + phase4.evaluation.metrics.normalizationFailures : 'Evaluation not available.';
+        const evaluationReasons = phase4.evaluation && Array.isArray(phase4.evaluation.reasons) ? phase4.evaluation.reasons.map((reason) => '<li><strong>' + reason.code + '</strong>: ' + reason.message + '<br/><small>Recommendation: ' + reason.recommendation + '</small></li>').join('') : '';
+        const evaluation = phase4.evaluation ? 'Evaluation: <strong>' + phase4.evaluation.outcome + '</strong><br/>Duplicate rate: ' + phase4.evaluation.metrics.duplicatePercent + '% · Schema conformance failures: ' + phase4.evaluation.metrics.schemaInvalidRecords + '<br/>Quality metrics: selector failures ' + phase4.evaluation.metrics.selectorFailures + ' · normalization failures ' + phase4.evaluation.metrics.normalizationFailures + (evaluationReasons ? '<h4>Reasons</h4><ul>' + evaluationReasons + '</ul>' : '') : 'Evaluation not available.';
         const records = phase4.result ? '<pre>' + JSON.stringify(phase4.result.records, null, 2) + '</pre>' : '';
-        const diagnostics = (phase4.diagnostics || []).map((diagnostic) => diagnostic.scope + ' ' + diagnostic.code + ': ' + diagnostic.message).join('<br/>');
+        const diagnosticGroups = new Map();
+        (phase4.diagnostics || []).forEach((diagnostic) => { const key = [diagnostic.code, diagnostic.pageType || '', diagnostic.field || '', diagnostic.selector || ''].join('|'); const group = diagnosticGroups.get(key) || { diagnostic, count: 0 }; group.count += 1; diagnosticGroups.set(key, group); });
+        const diagnostics = Array.from(diagnosticGroups.values()).map((group) => group.diagnostic.scope + ' ' + group.diagnostic.code + ' (' + group.count + '): ' + group.diagnostic.message).join('<br/>');
         const validationDiagnostics = (phase4.planValidationDiagnostics || []).map((diagnostic) => '<li><strong>[' + diagnostic.validationRuleId + ']</strong> ' + diagnostic.explanation + '<br/><small>Category: ' + diagnostic.category + ' · Severity: ' + diagnostic.severity + (diagnostic.field ? ' · Field: ' + diagnostic.field : '') + (diagnostic.selector ? ' · Selector: ' + diagnostic.selector : '') + (diagnostic.affectedRule ? ' · Rule: ' + diagnostic.affectedRule : '') + (diagnostic.evidenceReference ? ' · Evidence: ' + diagnostic.evidenceReference : '') + '<br/>Suggested correction: ' + diagnostic.suggestedCorrection + '</small></li>').join('');
         const validation = validationDiagnostics ? '<strong>FAIL</strong><ul>' + validationDiagnostics + '</ul>' : 'No extraction-plan validation failures.';
         phase4PreviewEl.innerHTML = '<h3>Schema Approval</h3><div>' + approval + '</div><h3>Extraction Plan</h3><div>' + plan + '</div><h3>Extraction Plan Validation</h3><div>' + validation + '</div><h3>Execution</h3><div>' + execution + '</div><h3>Evaluation</h3><div>' + evaluation + '</div><h3>Diagnostics</h3><div>' + (diagnostics || phase4.error || 'None') + '</div><h3>Record Preview</h3>' + records;
@@ -189,8 +232,10 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         logEl.textContent = '';
         appendLog('Starting…');
         renderSummary({ elapsedMs: 0, discoveredDatasets: 0, datasetId: 'n/a', pagesCrawled: 0, snapshotsCaptured: 0, schemaFields: 0, provider: 'n/a', model: 'n/a', promptTokens: 0, completionTokens: 0, totalTokens: 0, generatedIds: [] });
-        renderError(null, [], []);
+        renderError(null, [], [], []);
+        renderCandidates([], null);
         renderSchemaPreview(null);
+        renderSchemaDiagnostic(null);
         renderPhase4(null);
         try {
           const response = await fetch('/testing/run', {
@@ -222,9 +267,11 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
           const logLines = Array.isArray(payload.logs) ? payload.logs : [];
           logEl.textContent = logLines.join('\n');
           renderSummary(payload);
-          renderError(payload.error || payload.phase4?.error || null, payload.acquisitionDiagnostics, payload.phase4?.planValidationDiagnostics);
+          renderError(payload.error || payload.phase4?.error || null, payload.acquisitionDiagnostics, payload.phase4?.planValidationDiagnostics, payload.phase4?.evaluation?.reasons);
           renderSchemaPreview(payload.schemaPreview);
+          renderSchemaDiagnostic(payload.schemaGenerationDiagnostic);
           renderPhase4(payload.phase4);
+          renderCandidates(payload.candidates, payload.autoSelectedCandidate);
         } catch (error) {
           appendLog(error instanceof Error ? error.message : String(error));
         } finally {
@@ -271,30 +318,66 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
     const steps = parsed.data.steps;
     let errorMessage: string | null = null;
     let acquisitionDiagnostics: readonly { readonly url: string; readonly stage: "Acquisition"; readonly reason: string }[] = [];
+    let sourceId: string | null = null;
+    let discoveryResultId: string | null = null;
+    let candidateId: string | null = null;
+    let datasetId: string | null = null;
+    let snapshotCollectionId: string | null = null;
+    let schemaId: string | null = null;
+    let discoveredDatasets = 0;
+    let pagesCrawled = 0;
+    let snapshotsCaptured = 0;
+    let schemaFields = 0;
+    let phase4: DevelopmentPhase4WorkflowResult | null = null;
+    let candidates: readonly DashboardCandidate[] = [];
+    let autoSelectedCandidate: DashboardCandidate | null = null;
+    let schemaRunMetadata: ReturnType<SchemaUnderstandingService["getLastRunMetadata"]> = null;
+    const result = (): TestingDashboardRunResult => {
+      return {
+        elapsedMs: Date.now() - startedAt,
+        sourceId,
+        discoveryResultId,
+        candidateId,
+        datasetId,
+        snapshotCollectionId,
+        schemaId,
+        discoveredDatasets,
+        candidates,
+        autoSelectedCandidate,
+        pagesCrawled,
+        snapshotsCaptured,
+        schemaFields,
+        provider: deps.providerName,
+        model: deps.providerModel,
+        promptTokens: schemaRunMetadata?.promptTokens ?? 0,
+        completionTokens: schemaRunMetadata?.completionTokens ?? 0,
+        totalTokens: schemaRunMetadata?.totalTokens ?? 0,
+        generatedIds,
+        logs,
+        acquisitionDiagnostics,
+        error: errorMessage,
+        phase4,
+        schemaGenerationDiagnostic: schemaRunMetadata?.failure ?? null,
+        schemaPreview: schemaRunMetadata?.schemaPreview ?? null
+      };
+    };
 
     try {
       const source = await deps.sourceService.createSource({ sourceType: "website", url: parsed.data.url });
+      sourceId = source.id;
       generatedIds.push(source.id);
       logs.push(`Created source ${source.id}`);
 
-      let discoveryResultId: string | null = null;
-      let candidateId: string | null = null;
-      let datasetId: string | null = null;
-      let snapshotCollectionId: string | null = null;
-      let schemaId: string | null = null;
-      let discoveredDatasets = 0;
-      let pagesCrawled = 0;
-      let snapshotsCaptured = 0;
-      let schemaFields = 0;
-      let phase4: DevelopmentPhase4WorkflowResult | null = null;
-
       if (steps.discovery) {
-        const preview = await deps.discoveryService.discover(source.id, { ...defaultDiscoveryLimits, maxPages: 10, maxDepth: 2, allowedOrigins: [] });
+        const preview = await deps.discoveryService.discover(source.id, dashboardDiscoveryLimits);
         discoveryResultId = preview.discoveryResultId;
         discoveredDatasets = preview.candidates.length;
-        pagesCrawled = preview.candidates.reduce((total, candidate) => total + candidate.estimatedPageCount, 0);
+        candidates = preview.candidates;
         candidateId = preview.candidates[0]?.candidateId ?? null;
+        autoSelectedCandidate = preview.candidates[0] ?? null;
+        pagesCrawled = autoSelectedCandidate?.estimatedPageCount ?? 0;
         logs.push(`Discovery completed for ${preview.candidates.length} candidate(s)`);
+        if (autoSelectedCandidate) logs.push(`Auto-selected highest-ranked candidate ${autoSelectedCandidate.name} (${autoSelectedCandidate.classification}).`);
         acquisitionDiagnostics = await deps.discoveryService.acquisitionDiagnostics(preview.discoveryResultId);
         for (const diagnostic of acquisitionDiagnostics) logs.push(`${diagnostic.stage} failed for ${diagnostic.url}: ${diagnostic.reason}`);
         if (preview.candidates.length === 0 && acquisitionDiagnostics.length > 0) {
@@ -306,20 +389,21 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
       }
 
       if (steps.approval && discoveryResultId && candidateId) {
-        const approved = await deps.discoveryService.approveAndCapture({ candidateIds: [candidateId], approvedBy: "testing-dashboard", scope: ["default"], crawlBudget: { maxPages: 5, maxDepth: 1, maxBytesPerPage: 1_000_000, timeoutMs: 10_000, maxRedirects: 5 } });
+        const approved = await deps.discoveryService.approveAndCapture({ candidateIds: [candidateId], approvedBy: "testing-dashboard", scope: ["default"], crawlBudget: { maxPages: autoSelectedCandidate?.estimatedPageCount ?? dashboardDiscoveryLimits.maxPages, maxDepth: dashboardDiscoveryLimits.maxDepth, maxBytesPerPage: dashboardDiscoveryLimits.maxBytesPerPage, timeoutMs: dashboardDiscoveryLimits.timeoutMs, maxRedirects: dashboardDiscoveryLimits.maxRedirects } });
         datasetId = approved.dataset.id;
         snapshotCollectionId = approved.snapshots.id;
+        snapshotsCaptured = approved.snapshots.entries.filter((entry) => entry.outcome === "captured").length;
         generatedIds.push(approved.dataset.id, approved.crawlPlan.id, approved.snapshots.id);
         logs.push(`Approval completed for dataset ${approved.dataset.id}`);
       }
 
       if (steps.snapshotCapture && snapshotCollectionId) {
-        snapshotsCaptured = (await deps.discoveryService.preview(discoveryResultId!)).candidates.length;
         logs.push(`Snapshot capture completed for ${snapshotCollectionId}`);
       }
 
       if (steps.schema && snapshotCollectionId) {
         const schema = await deps.schemaService.analyze(snapshotCollectionId);
+        schemaRunMetadata = deps.schemaService.getLastRunMetadata();
         schemaId = schema.id;
         schemaFields = schema.fields.length;
         generatedIds.push(schema.id);
@@ -339,60 +423,19 @@ export function registerTestingRoutes(app: FastifyInstance, deps: { sourceServic
         if (phase4.error) logs.push(`Phase 4: ${phase4.error}`);
       }
 
-      const schemaRunMetadata = deps.schemaService.getLastRunMetadata?.() ?? null;
-
-      return reply.send({
-        elapsedMs: Date.now() - startedAt,
-        sourceId: source.id,
-        discoveryResultId,
-        candidateId,
-        datasetId,
-        snapshotCollectionId,
-        schemaId,
-        discoveredDatasets,
-        pagesCrawled,
-        snapshotsCaptured,
-        schemaFields,
-        provider: deps.providerName,
-        model: deps.providerModel,
-        promptTokens: schemaRunMetadata?.promptTokens ?? 0,
-        completionTokens: schemaRunMetadata?.completionTokens ?? 0,
-        totalTokens: schemaRunMetadata?.totalTokens ?? 0,
-        generatedIds,
-        logs,
-        acquisitionDiagnostics,
-        error: errorMessage,
-        phase4,
-        schemaPreview: schemaRunMetadata?.schemaPreview ?? null
-      } satisfies TestingDashboardRunResult);
+      return reply.send(result());
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error);
+      const providerFailure = error instanceof ApplicationError && error.code === "ai_provider_error";
+      if (providerFailure) {
+        schemaRunMetadata = deps.schemaService.getLastRunMetadata();
+        logs.push(`Schema Generation failed: ${errorMessage}`);
+        logs.push("Schema Approval skipped because schema generation did not succeed.");
+        logs.push("Extraction Plan, Execution, and Evaluation skipped because schema generation did not succeed.");
+        return reply.code(200).send(result());
+      }
       logs.push(`Pipeline failed: ${errorMessage}`);
-      const schemaRunMetadata = deps.schemaService.getLastRunMetadata?.() ?? null;
-      return reply.status(500).send({
-        elapsedMs: Date.now() - startedAt,
-        sourceId: null,
-        discoveryResultId: null,
-        candidateId: null,
-        datasetId: null,
-        snapshotCollectionId: null,
-        schemaId: null,
-        discoveredDatasets: 0,
-        pagesCrawled: 0,
-        snapshotsCaptured: 0,
-        schemaFields: 0,
-        provider: deps.providerName,
-        model: deps.providerModel,
-        promptTokens: schemaRunMetadata?.promptTokens ?? 0,
-        completionTokens: schemaRunMetadata?.completionTokens ?? 0,
-        totalTokens: schemaRunMetadata?.totalTokens ?? 0,
-        generatedIds,
-        logs,
-        acquisitionDiagnostics: [],
-        error: errorMessage,
-        phase4: null,
-        schemaPreview: schemaRunMetadata?.schemaPreview ?? null
-      } satisfies TestingDashboardRunResult);
+      return reply.status(500).send(result());
     }
   });
 }

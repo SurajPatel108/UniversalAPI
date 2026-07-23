@@ -7,6 +7,8 @@ interface PageSignals {
   readonly uniqueRecordTargets: number;
   readonly navigationTargets: number;
   readonly recordDensity: number;
+  readonly fieldRichness: number;
+  readonly repeatedStructure: number;
   readonly paginationSignals: number;
   readonly score: number;
 }
@@ -49,15 +51,17 @@ export class StructuralDatasetClassificationService implements DatasetClassifica
     const inferredUniqueTargets = links.filter((target) => (references.get(target) ?? 0) <= 1).length;
     const uniqueRecordTargets = page.structure?.mainRecordCandidates ?? inferredUniqueTargets;
     const navigationTargets = page.structure?.navigationLinkCount ?? links.filter((target) => (references.get(target) ?? 0) >= 2).length;
-    const denominator = page.structure?.mainLinkCount ?? links.length;
+    const denominator = page.structure?.mainUniqueLinkCount || page.structure?.mainLinkCount || links.length;
     const recordDensity = denominator === 0 ? 0 : uniqueRecordTargets / denominator;
+    const fieldRichness = page.structure?.mainAttributeCount ?? 0;
+    const repeatedStructure = page.structure?.repeatedSiblingGroups ?? 0;
     const paginationSignals = page.structure?.paginationLinkCount ?? links.filter((target) => /(?:[?&](?:page|p)=\d+|\bpage[-_/]?\d+\b)/i.test(target)).length;
-    const score = uniqueRecordTargets * 5 + recordDensity * 20 + paginationSignals * 4 - navigationTargets * 1.5;
-    return { page, uniqueRecordTargets, navigationTargets, recordDensity, paginationSignals, score };
+    const score = uniqueRecordTargets * 5 + recordDensity * 20 + fieldRichness * 0.25 + repeatedStructure * 4 + paginationSignals * 4 - navigationTargets * 3;
+    return { page, uniqueRecordTargets, navigationTargets, recordDensity, fieldRichness, repeatedStructure, paginationSignals, score };
   }
 
   private collectionCandidate(result: DiscoveryResult, pages: readonly PageSignals[]): DatasetCandidate {
-    const membershipUrls = pages.map((signal) => signal.page.canonicalUrl);
+    const membershipUrls = pages.map((signal) => signal.page.canonicalUrl).sort((left, right) => left.localeCompare(right));
     const records = pages.reduce((total, signal) => total + signal.uniqueRecordTargets, 0);
     const pagination = pages.reduce((total, signal) => total + signal.paginationSignals, 0);
     const density = pages.reduce((total, signal) => total + signal.recordDensity, 0) / pages.length;
@@ -68,7 +72,7 @@ export class StructuralDatasetClassificationService implements DatasetClassifica
       classification: "listings", membershipUrls, representativeUrls: membershipUrls.slice(0, 3),
       estimatedPageCount: membershipUrls.length, estimatedRecordCount: records || null, estimatedCrawlSeconds: membershipUrls.length,
       confidence,
-      explanation: `Ranked as the primary structured collection: ${records} record signals, ${(density * 100).toFixed(0)}% record density, and ${pagination} pagination signal(s).`,
+      explanation: `Ranked as the primary structured collection: ${records} record signals, ${(density * 100).toFixed(0)}% record density, ${pages.reduce((total, page) => total + page.fieldRichness, 0)} stable attribute signals, and ${pagination} pagination signal(s).`,
       knownRisks: result.completed ? [] : ["Discovery reached a configured limit"],
       provenance: { model: "structural-fallback", promptVersion: "structural-ranking-v2", confidence }, createdAt: new Date()
     };

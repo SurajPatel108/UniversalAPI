@@ -40,12 +40,18 @@ export class ExtractionEngine {
       try {
         const recordNodes = this.recordNodes($, rule.collectionSelector, rule.recordSelector);
         if (recordNodes.length === 0) diagnostics.push({ scope: "page", status: "info", snapshotId: entry.snapshot.id, sourcePageUrl: entry.url, pageType: rule.pageType, selector: rule.recordSelector, code: "NO_RECORDS", message: "Record selector matched no records" });
+        const recordsBeforePage = records.length;
         recordNodes.forEach((node, index) => {
           const extracted = this.record($, node, index, entry.snapshot!.id, entry.url, rule.pageType, rule.fields, schema, plan.revision, diagnostics, counters);
           if (extracted) records.push(extracted);
         });
-        counters.pagesSucceeded += 1;
-        diagnostics.push({ scope: "page", status: "info", snapshotId: entry.snapshot.id, sourcePageUrl: entry.url, pageType: rule.pageType, code: "PAGE_PROCESSED", message: "Page processed deterministically" });
+        if (records.length > recordsBeforePage) {
+          counters.pagesSucceeded += 1;
+          diagnostics.push({ scope: "page", status: "info", snapshotId: entry.snapshot.id, sourcePageUrl: entry.url, pageType: rule.pageType, code: "PAGE_PROCESSED", message: "Page produced valid records deterministically" });
+        } else {
+          counters.pagesFailed += 1;
+          diagnostics.push({ scope: "page", status: "warning", snapshotId: entry.snapshot.id, sourcePageUrl: entry.url, pageType: rule.pageType, selector: rule.recordSelector, code: "PAGE_NO_VALID_RECORDS", message: "Page produced no schema-conformant records" });
+        }
       } catch (error) {
         counters.pagesFailed += 1;
         diagnostics.push({ scope: "page", status: "error", snapshotId: entry.snapshot.id, sourcePageUrl: entry.url, pageType: rule.pageType, code: "PAGE_EXTRACTION_FAILED", message: error instanceof Error ? error.message : "Page extraction failed" });
@@ -55,7 +61,7 @@ export class ExtractionEngine {
     const deduplicated = this.duplicates(ordered, plan, diagnostics, counters);
     const capturedPages = entries.filter((entry) => entry.outcome === "captured" && entry.snapshot && entry.content !== undefined).length;
     const requiredTotal = ordered.length * schema.fields.filter((field) => field.required).length;
-    const metrics: ExtractionMetrics = { pagesProcessed: counters.pagesProcessed, pagesSucceeded: counters.pagesSucceeded, pagesFailed: counters.pagesFailed, recordsExtracted: deduplicated.length, recordsRejected: counters.recordsRejected, fieldsExtracted: counters.fieldsExtracted, missingRequiredFields: counters.missingRequiredFields, duplicatesRemoved: counters.recordsRejected - counters.schemaInvalidRecords < 0 ? 0 : 0, selectorFailures: counters.selectorFailures, normalizationFailures: counters.normalizationFailures, executionDurationMs: 0, snapshotCoveragePercent: this.percent(counters.pagesProcessed, entries.length), pageCoveragePercent: this.percent(counters.pagesSucceeded, capturedPages), requiredFieldCompletenessPercent: this.percent(requiredTotal - counters.missingRequiredFields, requiredTotal), duplicatePercent: 0, schemaInvalidRecords: counters.schemaInvalidRecords };
+    const metrics: ExtractionMetrics = { pagesProcessed: counters.pagesProcessed, pagesSucceeded: counters.pagesSucceeded, pagesFailed: counters.pagesFailed, recordsExtracted: deduplicated.length, recordsRejected: counters.recordsRejected, fieldsExtracted: counters.fieldsExtracted, missingRequiredFields: counters.missingRequiredFields, duplicatesRemoved: 0, selectorFailures: counters.selectorFailures, normalizationFailures: counters.normalizationFailures, executionDurationMs: 0, snapshotCoveragePercent: this.percent(counters.pagesProcessed, entries.length), pageCoveragePercent: this.percent(counters.pagesSucceeded, capturedPages), requiredFieldCompletenessPercent: this.percent(requiredTotal - counters.missingRequiredFields, requiredTotal), duplicatePercent: 0, schemaInvalidRecords: counters.schemaInvalidRecords };
     const duplicateCount = diagnostics.filter((diagnostic) => diagnostic.code === "DUPLICATE_REMOVED" || diagnostic.code === "DUPLICATE_REJECTED").length;
     return { records: deduplicated, diagnostics: diagnostics.sort(this.diagnosticOrder), metrics: { ...metrics, duplicatesRemoved: duplicateCount, duplicatePercent: this.percent(duplicateCount, duplicateCount + deduplicated.length) } };
   }

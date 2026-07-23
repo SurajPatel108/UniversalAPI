@@ -35,6 +35,17 @@ describe("deterministic extraction primitives", () => {
     expect(output.records[0]?.fields.name.selector).toBe(".record");
   });
 
+  it("does not report coverage for pages whose records all fail deterministic validation", () => {
+    const invalidFieldPlan: ExtractionPlan = {
+      ...plan,
+      pageTypes: [{ ...plan.pageTypes[0]!, fields: [{ ...plan.pageTypes[0]!.fields[0]!, selector: ".missing" }, plan.pageTypes[0]!.fields[1]! ] }]
+    };
+    const output = new ExtractionEngine().execute(invalidFieldPlan, collection, schema);
+    expect(output.records).toEqual([]);
+    expect(output.metrics.pageCoveragePercent).toBe(0);
+    expect(output.diagnostics.some((diagnostic) => diagnostic.code === "PAGE_NO_VALID_RECORDS")).toBe(true);
+  });
+
   it("classifies deterministic quality thresholds without parsing snapshots", () => {
     const output = new ExtractionEngine().execute(plan, collection, schema);
     const result: ExtractionResult = { resultId: "result", planId: plan.planId, datasetId: plan.datasetId, snapshotCollectionId: plan.snapshotCollectionId, schemaVersion: plan.schemaVersion, planRevision: plan.revision, replayFingerprint: "replay", records: output.records, diagnostics: output.diagnostics, metrics: output.metrics, createdAt: plan.createdAt };

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import * as cheerio from "cheerio";
 import { ApplicationError } from "../core/errors.js";
 import type { CrawlPlan } from "../models/crawl.js";
 import type { DiscoveryLimits, DiscoveryResult, DiscoveredPage } from "../models/discovery.js";
@@ -28,7 +29,7 @@ export class WebsiteConnector implements DatasetDiscoveryConnector {
         const artifacts = await this.engine.acquire(canonicalUrl, this.engineOptions(limits)); const finalUrl = this.canonicalize(artifacts.finalUrl);
         if (!this.allowed(finalUrl, origins)) throw new ApplicationError("acquisition_failed", "Crawl result redirected outside allowed origins");
         const links = artifacts.links.map((link) => this.resolve(link, finalUrl)).filter((link): link is string => Boolean(link) && this.allowed(link!, origins));
-        pages.push(this.page(current, finalUrl, [...new Set(links)], this.title(artifacts.rawHtml), "text/html", "captured"));
+        pages.push(this.page(current, finalUrl, [...new Set(links)], this.title(artifacts.rawHtml), "text/html", "captured", undefined, this.structure(artifacts.rawHtml)));
         if (current.depth < limits.maxDepth) links.forEach((url) => queue.push({ url, depth: current.depth + 1, parentUrl: finalUrl }));
       } catch (error) { pages.push(this.page(current, canonicalUrl, [], null, null, "failed", error instanceof Error ? error.message : "acquisition failed")); }
     }
@@ -52,8 +53,38 @@ export class WebsiteConnector implements DatasetDiscoveryConnector {
   private resolve(raw: string, base: string): string | null { try { return this.canonicalize(new URL(raw, base).toString()); } catch { return null; } }
   private canonicalize(raw: string): string { const url = new URL(raw); url.hash = ""; return url.toString(); }
   private title(html: string): string | null { return /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1].replace(/\s+/g, " ").trim() || null; }
+  /** Compact, deterministic DOM observations for ranking. Raw content remains in snapshots. */
+  private structure(html: string): DiscoveredPage["structure"] {
+    const $ = cheerio.load(html);
+    const root = $("main").first().length > 0 ? $("main").first() : $("body").first();
+    const primary = root.find("*").filter((_index, element) => !this.isChrome($, element));
+    const mainLinks = primary.filter("a[href]");
+    const mainRecordCandidates = primary.filter("article, [itemtype], [class*=product], [class*=listing], [class*=record]").length;
+    const mainUniqueLinkCount = new Set(mainLinks.toArray().map((element) => $(element).attr("href")).filter((href): href is string => Boolean(href))).size;
+    const mainAttributeCount = primary.toArray().reduce((count, element) => count + Object.keys(element.attribs ?? {}).filter((name) => ["href", "src", "title", "alt", "datetime", "content", "itemprop", "data-id"].includes(name)).length, 0);
+    const repeatedSiblingGroups = primary.toArray().filter((element) => {
+      const children = $(element).children().toArray().filter((child) => !this.isChrome($, child));
+      if (children.length < 3) return false;
+      const identities = children.map((child) => `${(child as { tagName?: string }).tagName ?? "node"}.${($(child).attr("class") ?? "").split(/\s+/).filter(Boolean).sort().join(".")}`);
+      return new Set(identities).size < children.length;
+    }).length;
+    const navigationLinkCount = $("body").find("a[href]").toArray().filter((element) => this.isChrome($, element)).length;
+    const paginationLinkCount = mainLinks.toArray().filter((element) => /(?:[?&](?:page|p)=\d+|\bpage[-_/]?\d+\b)/i.test($(element).attr("href") ?? "")).length;
+    const mainHeading = primary.filter("h1, h2").first().text().replace(/\s+/g, " ").trim() || null;
+    return { mainRecordCandidates, mainLinkCount: mainLinks.length, mainUniqueLinkCount, mainAttributeCount, repeatedSiblingGroups, navigationLinkCount, paginationLinkCount, mainHeading };
+  }
+  private isChrome($: cheerio.CheerioAPI, element: unknown): boolean {
+    return $(element as never).parents().addBack().toArray().some((ancestor) => {
+      const tag = (ancestor as { tagName?: string }).tagName?.toLowerCase();
+      if (tag === "nav" || tag === "aside" || tag === "header" || tag === "footer") return true;
+      const node = $(ancestor);
+      const role = node.attr("role");
+      if (role === "navigation" || role === "banner" || role === "contentinfo") return true;
+      return /(?:nav|menu|sidebar|side_categories|breadcrumb|header|footer)/i.test(`${node.attr("class") ?? ""} ${node.attr("id") ?? ""}`);
+    });
+  }
   private engineOptions(limits: DiscoveryLimits) { return { maxBytes: limits.maxBytesPerPage, timeoutMs: limits.timeoutMs, maxRedirects: limits.maxRedirects }; }
-  private page(current: { url: string; depth: number; parentUrl: string | null }, canonicalUrl: string, links: readonly string[], title: string | null, contentType: string | null, disposition: DiscoveredPage["disposition"], reason?: string): DiscoveredPage { return { url: current.url, canonicalUrl, depth: current.depth, parentUrl: current.parentUrl, links, title, contentType, disposition, ...(reason ? { reason } : {}) }; }
+  private page(current: { url: string; depth: number; parentUrl: string | null }, canonicalUrl: string, links: readonly string[], title: string | null, contentType: string | null, disposition: DiscoveredPage["disposition"], reason?: string, structure?: DiscoveredPage["structure"]): DiscoveredPage { return { url: current.url, canonicalUrl, depth: current.depth, parentUrl: current.parentUrl, links, title, contentType, disposition, ...(reason ? { reason } : {}), ...(structure ? { structure } : {}) }; }
 }
 
 export function createWebsiteConnector(baseUrl?: string, token?: string): WebsiteConnector {

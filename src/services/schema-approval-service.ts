@@ -26,12 +26,14 @@ export class SchemaApprovalService {
     const diagnostics: string[] = [];
     const propertyNames = new Set(Object.keys(schema.schema.properties));
     const fieldNames = new Set(schema.fields.map((field) => field.name));
+    const evidenceReferences = new Set(schema.sampleSnapshotIds.map((snapshotId) => `snapshot:${snapshotId}`));
     if (schema.schema.type !== "object") diagnostics.push("Schema root must be an object.");
     if (schema.fields.length === 0) diagnostics.push("Schema proposal has no fields.");
     if (fieldNames.size !== schema.fields.length) diagnostics.push("Schema proposal contains duplicate field names.");
     for (const field of schema.fields) {
       if (!propertyNames.has(field.name)) diagnostics.push(`Schema field ${field.name} has no matching property.`);
       if (!field.evidence.trim()) diagnostics.push(`Schema field ${field.name} has no evidence.`);
+      else if (!evidenceReferences.has(field.evidence)) diagnostics.push(`Schema field ${field.name} cites unknown evidence ${field.evidence}.`);
     }
     for (const required of schema.schema.required) if (!fieldNames.has(required)) diagnostics.push(`Required schema property ${required} has no field definition.`);
     for (const sampleId of schema.sampleSnapshotIds) if (!sampleId.trim()) diagnostics.push("Schema proposal contains an empty sample snapshot reference.");

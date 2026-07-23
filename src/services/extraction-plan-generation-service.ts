@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as cheerio from "cheerio";
 import { z } from "zod";
-import type { AIProvider } from "../ai/providers/ai-provider.js";
+import { AIProviderError, type AIProvider, type StructuredJsonSchema } from "../ai/providers/ai-provider.js";
 import { ApplicationError } from "../core/errors.js";
 import type { DiscoveryRepository } from "../database/discovery-repository.js";
 import type { ExtractionRepository } from "../database/extraction-repository.js";
@@ -10,9 +10,9 @@ import type { ExecutionPolicy, ExtractionFieldRule, ExtractionPlan, ExtractionPl
 import type { DatasetSchema } from "../models/schema.js";
 import type { SnapshotCollection } from "../models/snapshot-collection.js";
 
-export const EXTRACTION_PLAN_PROMPT_VERSION = "extraction-plan-v3-main-content";
-export const EXTRACTION_PLAN_PREPROCESSING_VERSION = "extraction-plan-main-content-dom-v2";
-export const EXTRACTION_PLAN_SAMPLING_VERSION = "extraction-plan-samples-v1";
+export const EXTRACTION_PLAN_PROMPT_VERSION = "extraction-plan-v4-grounded-main-content";
+export const EXTRACTION_PLAN_PREPROCESSING_VERSION = "extraction-plan-main-content-dom-v3";
+export const EXTRACTION_PLAN_SAMPLING_VERSION = "extraction-plan-stratified-samples-v2";
 
 export const conservativeExecutionPolicy: ExecutionPolicy = {
   allowHtmlExtraction: false,
@@ -51,6 +51,48 @@ const proposalSchema = z.object({
 });
 
 type ExtractionPlanProposal = z.infer<typeof proposalSchema>;
+
+const extractionPlanResponseSchema: StructuredJsonSchema = {
+  type: "object",
+  properties: {
+    pageTypes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          pageType: { type: "string" },
+          classificationEvidence: { type: "array", items: { type: "string" } },
+          collectionSelector: { type: "string" },
+          recordSelector: { type: "string" },
+          fields: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                field: { type: "string" },
+                selector: { type: "string" },
+                source: { type: "string", enum: ["text", "attribute", "html"] },
+                attribute: { type: "string" },
+                transforms: { type: "array", items: { type: "string" } },
+                defaultValue: {},
+                required: { type: "boolean" },
+                evidenceReference: { type: "string" }
+              },
+              required: ["field", "selector", "source", "transforms", "required", "evidenceReference"]
+            }
+          }
+        },
+        required: ["pageType", "classificationEvidence", "recordSelector", "fields"]
+      }
+    },
+    pagination: { type: "object", properties: { strategy: { type: "string", enum: ["none", "snapshot_pages"] }, evidenceReference: { type: "string" } }, required: ["strategy", "evidenceReference"] },
+    duplicatePolicy: { type: "object", properties: { strategy: { type: "string", enum: ["allow", "deduplicate", "reject"] }, keyFields: { type: "array", items: { type: "string" } } }, required: ["strategy", "keyFields"] },
+    missingFieldPolicy: { type: "string", enum: ["allow", "reject_record", "use_default"] },
+    examples: { type: "array", items: { type: "object", properties: { snapshotId: { type: "string" }, recordIndex: { type: "integer", minimum: 0 }, evidenceReference: { type: "string" } }, required: ["snapshotId", "recordIndex", "evidenceReference"] } },
+    confidence: { type: "number", minimum: 0, maximum: 1 }
+  },
+  required: ["pageTypes", "pagination", "duplicatePolicy", "missingFieldPolicy", "examples", "confidence"]
+};
 
 const requiredTopLevelProperties = ["pageTypes", "pagination", "duplicatePolicy", "missingFieldPolicy", "examples", "confidence"] as const;
 const topLevelPropertyTypes: Record<(typeof requiredTopLevelProperties)[number], string> = {
@@ -126,23 +168,32 @@ export class ExtractionPlanGenerationService {
       return cached;
     }
 
-    let rawProposal: unknown;
-    try {
-      rawProposal = await this.provider.generateStructured({
-        operation: "extraction_plan",
+    const generationRequest = (maxOutputTokens: number) => ({
+        operation: "extraction_plan" as const,
+        promptVersion: EXTRACTION_PLAN_PROMPT_VERSION,
+        responseSchema: extractionPlanResponseSchema,
+        maxOutputTokens,
         prompt: this.prompt(),
         input: {
           schema: { id: schema.id, version: schema.collectionRevision, fields: schema.fields.map((field) => ({ name: field.name, type: field.type, required: field.required, evidence: field.evidence })) },
           samples: context.samples,
-          pageClassifications: context.pageClassifications,
           deterministicMetadata: context.deterministicMetadata,
-          evidenceReferences: context.evidenceReferences,
           executionPolicy: this.executionPolicy
         }
       });
+    let rawProposal: unknown;
+    try {
+      rawProposal = await this.provider.generateStructured(generationRequest(2_048));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "AI provider request failed";
-      throw new ApplicationError("extraction_plan_generation_failed", `Extraction plan generation failed: ${message}`, true);
+      if (this.isRetryableTruncation(error)) {
+        try {
+          rawProposal = await this.provider.generateStructured(generationRequest(4_096));
+        } catch (retryError) {
+          throw this.providerFailure(retryError);
+        }
+      } else {
+        throw this.providerFailure(error);
+      }
     }
 
     const responseDiagnostics = this.providerResponseDiagnostics(rawProposal);
@@ -151,7 +202,10 @@ export class ExtractionPlanGenerationService {
     const parsedProposal = proposalSchema.safeParse(rawProposal);
     if (!parsedProposal.success) this.rejectProposal(rawProposal, [...topLevelDiagnostics, ...this.structureDiagnostics(parsedProposal.error, new Set(topLevelDiagnostics.flatMap((diagnostic) => diagnostic.affectedRule ? [diagnostic.affectedRule] : [])))]);
     const proposal = parsedProposal.data;
-    const validationDiagnostics = this.validateProposal(proposal, schema, context.evidenceReferences, context.sampleSnapshotIds);
+    const validationDiagnostics = [
+      ...this.validateProposal(proposal, schema, context.evidenceReferences, context.sampleSnapshotIds),
+      ...this.validateSampleMatches(proposal, context.capturedEntries)
+    ];
     if (validationDiagnostics.length > 0) this.rejectProposal(rawProposal, validationDiagnostics);
     const latest = await this.extractions.findLatestPlanForDataset(schema.datasetId);
     const createdAt = new Date();
@@ -197,14 +251,23 @@ export class ExtractionPlanGenerationService {
   getLastRunMetadata(): ExtractionPlanGenerationMetadata | null { return this.lastRunMetadata; }
   getLastValidationDiagnostics(): readonly ExtractionPlanValidationDiagnostic[] { return this.lastValidationDiagnostics; }
 
+  private isRetryableTruncation(error: unknown): boolean {
+    return error instanceof AIProviderError && error.diagnostic.operation === "extraction_plan" && error.diagnostic.failureType === "truncated_response";
+  }
+  private providerFailure(error: unknown): ApplicationError {
+    const message = error instanceof Error ? error.message : "AI provider request failed";
+    return new ApplicationError("extraction_plan_generation_failed", `Extraction plan generation failed: ${message}`, true);
+  }
+
   private async requireSchema(schemaId: string): Promise<DatasetSchema> { const schema = await this.schemas.findById(schemaId); if (!schema) throw new ApplicationError("not_found", "Schema not found"); return schema; }
   private async requireCollection(snapshotCollectionId: string): Promise<SnapshotCollection> { const collection = await this.discoveries.findSnapshotCollection(snapshotCollectionId); if (!collection) throw new ApplicationError("not_found", "Snapshot collection not found"); return collection; }
 
   private context(collection: SnapshotCollection, schema: DatasetSchema) {
     const captured = collection.entries.filter((entry) => entry.outcome === "captured" && entry.snapshot && entry.content).sort((left, right) => left.url.localeCompare(right.url) || left.snapshot!.id.localeCompare(right.snapshot!.id));
-    const samples = captured.slice(0, 3).map((entry) => ({
+    const samples = this.representativeTemplateSamples(captured).map((entry) => ({
       snapshotId: entry.snapshot!.id,
       url: entry.url,
+      pageType: this.pageType(entry.url),
       semanticText: this.semanticText(entry.content!),
       structuralDom: this.structuralDom(entry.content!),
       evidenceReference: this.evidenceReference(entry.snapshot!.id)
@@ -216,7 +279,6 @@ export class ExtractionPlanGenerationService {
       capturedEntries: captured,
       evidenceReferences,
       sampleSnapshotIds: samples.map((sample) => sample.snapshotId),
-      pageClassifications: samples.map((sample) => ({ snapshotId: sample.snapshotId, pageType: this.pageType(sample.url), evidenceReference: sample.evidenceReference })),
       deterministicMetadata: {
         datasetId: schema.datasetId,
         snapshotCollectionId: collection.id,
@@ -228,45 +290,23 @@ export class ExtractionPlanGenerationService {
     };
   }
 
+  private representativeTemplateSamples<T extends SnapshotCollection["entries"][number]>(captured: readonly T[]): readonly T[] {
+    const samples: T[] = [];
+    const seenTemplates = new Set<string>();
+    for (const entry of captured) {
+      const template = this.templateSignature(entry.content ?? "");
+      if (!seenTemplates.has(template)) { samples.push(entry); seenTemplates.add(template); }
+      if (samples.length === 3) return samples;
+    }
+    return samples;
+  }
+
   private prompt(): string {
-    return `Return exactly one JSON object. Do not output markdown, explanations, code fences, comments, prose, code, JavaScript, XPath, regular expressions, executable expressions, crawling instructions, or HTML parsing instructions. The output must be a complete declarative ExtractionPlan proposal. Every required property below must be present. Omission of any required property invalidates the proposal. Do not invent a different structure and do not rely on defaults.
+    return `Return exactly one complete JSON object matching the supplied response schema. Do not output Markdown, code fences, prose, comments, code, JavaScript, XPath, regular expressions, executable expressions, or HTML parsing instructions.
 
-Use only the approved schema fields, supplied evidenceReferences, supplied sample snapshot IDs, supplied pageClassifications, deterministic structuralDom evidence inside samples, and supplied executionPolicy. Use only static CSS selectors supported by Cheerio. Every selector and field rule must cite supplied evidence. structuralDom contains bounded redacted main-content hierarchy and candidate field locations; navigation, sidebars, breadcrumbs, headers, and footers are excluded. Plan record boundaries only for primary-content collections. Do not plan a repeated navigation collection or a page that cannot contribute dataset records.
+Use only approved schema fields and the bounded primary-content samples. Each sample contains its pageType, snapshotId, evidenceReference, semanticText, and structuralDom. Every classificationEvidence and field evidenceReference must use a sample evidenceReference; every example snapshotId must be a supplied sample snapshotId. Plan only primary-content record containers, never navigation, sidebars, breadcrumbs, headers, footers, menus, or pages that cannot add dataset records.
 
-Required top-level properties:
-- pageTypes: required array<PageTypeDefinition>; at least one item; no default; empty array is not permitted.
-- pagination: required PaginationDefinition object; no default.
-- duplicatePolicy: required DuplicatePolicyDefinition object; no default.
-- missingFieldPolicy: required string enum "allow", "reject_record", or "use_default"; no default.
-- examples: required array<ExampleDefinition>; at least one item; no default; empty array is not permitted.
-- confidence: required number from 0 through 1; no default.
-
-PageTypeDefinition:
-- pageType: required non-empty string.
-- classificationEvidence: required non-empty array<string>; every value must be a supplied evidence reference.
-- collectionSelector: optional non-empty static CSS selector; omit it when no collection wrapper is needed; no default.
-- recordSelector: required non-empty static CSS selector.
-- fields: required non-empty array<FieldDefinition>; empty array is not permitted.
-
-FieldDefinition:
-- field: required non-empty string and an approved schema field name.
-- selector: required non-empty static CSS selector.
-- source: required enum "text", "attribute", or "html". Use "html" only when executionPolicy.allowHtmlExtraction is true.
-- attribute: required non-empty string only when source is "attribute"; otherwise omit it; no default.
-- transforms: required array<string>; empty array is permitted; include it even when empty; every item must be allowed by executionPolicy.allowedTransforms; no default.
-- defaultValue: optional JSON value; omit it when no default is needed; no default.
-- required: required boolean.
-- evidenceReference: required non-empty string from evidenceReferences.
-
-PaginationDefinition: {"strategy":"none"|"snapshot_pages","evidenceReference":"supplied evidence reference"}. Both properties are required; no defaults.
-DuplicatePolicyDefinition: {"strategy":"allow"|"deduplicate"|"reject","keyFields":["approved schema field name"]}. Both properties are required. keyFields may be empty. No defaults.
-ExampleDefinition: {"snapshotId":"supplied sample snapshot ID","recordIndex":0,"evidenceReference":"supplied evidence reference"}. All properties are required. examples must contain at least one item.
-
-JSON Schema guidance:
-{"type":"object","required":["pageTypes","pagination","duplicatePolicy","missingFieldPolicy","examples","confidence"],"properties":{"pageTypes":{"type":"array","minItems":1,"items":{"type":"object","required":["pageType","classificationEvidence","recordSelector","fields"],"properties":{"pageType":{"type":"string","minLength":1},"classificationEvidence":{"type":"array","minItems":1,"items":{"type":"string"}},"collectionSelector":{"type":"string","minLength":1},"recordSelector":{"type":"string","minLength":1},"fields":{"type":"array","minItems":1,"items":{"type":"object","required":["field","selector","source","transforms","required","evidenceReference"],"properties":{"field":{"type":"string","minLength":1},"selector":{"type":"string","minLength":1},"source":{"enum":["text","attribute","html"]},"attribute":{"type":"string","minLength":1},"transforms":{"type":"array","items":{"type":"string"}},"defaultValue":{},"required":{"type":"boolean"},"evidenceReference":{"type":"string","minLength":1}}}}}}},"pagination":{"type":"object","required":["strategy","evidenceReference"],"properties":{"strategy":{"enum":["none","snapshot_pages"]},"evidenceReference":{"type":"string","minLength":1}}},"duplicatePolicy":{"type":"object","required":["strategy","keyFields"],"properties":{"strategy":{"enum":["allow","deduplicate","reject"]},"keyFields":{"type":"array","items":{"type":"string","minLength":1}}}},"missingFieldPolicy":{"enum":["allow","reject_record","use_default"]},"examples":{"type":"array","minItems":1,"items":{"type":"object","required":["snapshotId","recordIndex","evidenceReference"],"properties":{"snapshotId":{"type":"string","minLength":1},"recordIndex":{"type":"integer","minimum":0},"evidenceReference":{"type":"string","minLength":1}}}},"confidence":{"type":"number","minimum":0,"maximum":1}}}
-
-Complete example with placeholder values:
-{"pageTypes":[{"pageType":"path:catalog","classificationEvidence":["snapshot:sample-1"],"collectionSelector":"main.catalog","recordSelector":"article.record","fields":[{"field":"title","selector":"h2.title","source":"text","transforms":["trim"],"required":true,"evidenceReference":"snapshot:sample-1"},{"field":"detailUrl","selector":"a.detail","source":"attribute","attribute":"href","transforms":["canonical_url"],"defaultValue":null,"required":false,"evidenceReference":"snapshot:sample-1"}]}],"pagination":{"strategy":"snapshot_pages","evidenceReference":"snapshot:sample-1"},"duplicatePolicy":{"strategy":"deduplicate","keyFields":["title"]},"missingFieldPolicy":"reject_record","examples":[{"snapshotId":"sample-1","recordIndex":0,"evidenceReference":"snapshot:sample-1"}],"confidence":0.9}`;
+Use only static CSS selectors supported by Cheerio. Field source must be text, attribute, or html; use html only when executionPolicy.allowHtmlExtraction is true. Attribute source requires attribute. Every transforms array must be present and contain only executionPolicy.allowedTransforms. Use only executionPolicy-safe duplicate, missing-field, and collection behavior. The deterministic validator is authoritative: do not omit required response-schema properties or invent fields, evidence, selectors, transforms, or defaults.`;
   }
 
   private validateProposal(proposal: ExtractionPlanProposal, schema: DatasetSchema, evidenceReferences: readonly string[], sampleSnapshotIds: readonly string[]): ExtractionPlanValidationDiagnostic[] {
@@ -322,18 +362,23 @@ Complete example with placeholder values:
       const evidenceEntries = captured.filter((entry) => evidenceSnapshotIds.has(entry.snapshot!.id));
       let recordMatched = false;
       let navigationOnly = false;
+      let collectionMatched = !pageType.collectionSelector;
       const fieldMatches = new Set<string>();
       for (const entry of evidenceEntries) {
         const $ = cheerio.load(entry.content!);
         const allRecords = $(pageType.recordSelector).toArray();
         const navigation = this.navigationNodes($);
         const navigationRecords = navigation.find(pageType.recordSelector).toArray();
-        if (allRecords.length > 0) {
-          recordMatched = true;
-          if (navigationRecords.length === allRecords.length) navigationOnly = true;
-        }
+        if (allRecords.length > 0 && navigationRecords.length === allRecords.length) navigationOnly = true;
+        this.removeChrome($);
         const root = this.mainContent($);
-        const records = root.find(pageType.recordSelector).toArray();
+        const collections = pageType.collectionSelector ? (root.is(pageType.collectionSelector) ? root.toArray() : root.find(pageType.collectionSelector).toArray()) : root.toArray();
+        if (collections.length > 0) collectionMatched = true;
+        const records = collections.flatMap((container) => {
+          const node = $(container);
+          return node.is(pageType.recordSelector) ? node.toArray() : node.find(pageType.recordSelector).toArray();
+        });
+        if (records.length > 0) recordMatched = true;
         for (const record of records) {
           for (const field of pageType.fields) {
             const node = $(record);
@@ -341,8 +386,9 @@ Complete example with placeholder values:
           }
         }
       }
-      if (!recordMatched) diagnostics.push({ validationRuleId: "RECORD_SELECTOR_NO_SAMPLE_MATCH", category: "sample_validation", severity: "error", affectedRule: pageType.pageType, selector: pageType.recordSelector, explanation: `Record selector "${pageType.recordSelector}" did not match any supplied evidence snapshot.`, suggestedCorrection: "Use a record selector observed in the supplied main-content structural evidence." });
-      else if (navigationOnly) diagnostics.push({ validationRuleId: "RECORD_SELECTOR_NAVIGATION_ONLY", category: "sample_validation", severity: "error", affectedRule: pageType.pageType, selector: pageType.recordSelector, explanation: `Record selector "${pageType.recordSelector}" matches only excluded navigation structures in its evidence samples.`, suggestedCorrection: "Choose a repeated primary-content record container instead of navigation, sidebar, breadcrumb, header, or footer content." });
+      if (!collectionMatched && pageType.collectionSelector) diagnostics.push({ validationRuleId: "COLLECTION_SELECTOR_NO_SAMPLE_MATCH", category: "sample_validation", severity: "error", affectedRule: pageType.pageType, selector: pageType.collectionSelector, explanation: `Collection selector "${pageType.collectionSelector}" did not match primary content in supplied evidence.`, suggestedCorrection: "Use a collection selector observed in the supplied primary-content structural evidence." });
+      if (navigationOnly && !recordMatched) diagnostics.push({ validationRuleId: "RECORD_SELECTOR_NAVIGATION_ONLY", category: "sample_validation", severity: "error", affectedRule: pageType.pageType, selector: pageType.recordSelector, explanation: `Record selector "${pageType.recordSelector}" matches only excluded navigation structures in its evidence samples.`, suggestedCorrection: "Choose a repeated primary-content record container instead of navigation, sidebar, breadcrumb, header, or footer content." });
+      else if (!recordMatched) diagnostics.push({ validationRuleId: "RECORD_SELECTOR_NO_SAMPLE_MATCH", category: "sample_validation", severity: "error", affectedRule: pageType.pageType, selector: pageType.recordSelector, explanation: `Record selector "${pageType.recordSelector}" did not match any supplied evidence snapshot.`, suggestedCorrection: "Use a record selector observed in the supplied main-content structural evidence." });
       for (const field of pageType.fields.filter((field) => field.required && !fieldMatches.has(field.field))) {
         diagnostics.push({ validationRuleId: "REQUIRED_FIELD_SELECTOR_NO_SAMPLE_MATCH", category: "sample_validation", severity: "error", field: field.field, affectedRule: pageType.pageType, selector: field.selector, evidenceReference: field.evidenceReference, explanation: `Required field selector "${field.selector}" for "${field.field}" did not match a record in supplied evidence.`, suggestedCorrection: "Use a field selector observed within a matching primary-content record." });
       }
@@ -393,22 +439,33 @@ Complete example with placeholder values:
   private semanticText(content: string): string {
     const $ = cheerio.load(content.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]").replace(/\+?\d[\d\s().-]{7,}\d/g, "[REDACTED_PHONE]"));
     this.removeChrome($);
-    return this.mainContent($).text().replace(/\s+/g, " ").trim().slice(0, 1_200);
+    return this.mainContent($).text().replace(/\s+/g, " ").trim().slice(0, 600);
   }
+  private pathShape(value: string): string { try { return new URL(value).pathname.replace(/\d+/g, ":id").replace(/\/+/g, "/") || "/"; } catch { return value; } }
   private structuralDom(content: string): readonly { readonly selectorHint: string; readonly occurrences: number; readonly fieldLocations: readonly { readonly selectorHint: string; readonly text: string; readonly attributes: readonly string[] }[] }[] {
     const $ = cheerio.load(content);
     this.removeChrome($);
     const root = this.mainContent($);
-    const candidates = root.find("article, [itemtype], [class*=product], [class*=listing], [class*=record]").toArray().slice(0, 8);
+    const candidates = root.find("article, [itemtype], [class*=product], [class*=listing], [class*=record]").toArray().slice(0, 3);
     return candidates.map((element) => {
       const selectorHint = this.selectorHint($, element);
-      const fieldLocations = $(element).find("a, h1, h2, h3, p, span, time, img").toArray().slice(0, 10).map((child) => ({
+      const fieldLocations = $(element).find("a, h1, h2, h3, p, span, time, img").toArray().slice(0, 3).map((child) => ({
         selectorHint: this.selectorHint($, child),
         text: $(child).text().replace(/\s+/g, " ").trim().slice(0, 100),
         attributes: Object.keys(child.attribs ?? {}).filter((name) => ["href", "src", "title", "alt", "datetime", "content"].includes(name)).sort()
       }));
       return { selectorHint, occurrences: root.find(selectorHint).length, fieldLocations };
     });
+  }
+  private templateSignature(content: string): string {
+    const $ = cheerio.load(content);
+    this.removeChrome($);
+    const selectors = this.mainContent($)
+      .find("article, [itemtype], [class*=product], [class*=listing], [class*=record]")
+      .toArray()
+      .slice(0, 3)
+      .map((element) => this.selectorHint($, element));
+    return [...new Set(selectors)].sort().join("|") || "no-primary-record-candidates";
   }
   private selectorHint($: cheerio.CheerioAPI, element: unknown): string {
     const node = $(element as never);

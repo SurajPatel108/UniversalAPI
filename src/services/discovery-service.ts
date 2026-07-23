@@ -50,7 +50,7 @@ export class DiscoveryService {
     const result = await this.requireResult(resultId);
     const source = await this.requireWebsite(result.sourceId);
     const allowed = new Set(selected.flatMap((candidate) => candidate.membershipUrls));
-    const defaultScope = selected.flatMap((candidate) => candidate.representativeUrls.length > 0 ? candidate.representativeUrls : candidate.membershipUrls);
+    const defaultScope = selected.flatMap((candidate) => candidate.membershipUrls);
     const scope = input.scope?.length ? this.normalizeScope(input.scope, defaultScope) : defaultScope;
     if (scope.some((url) => !allowed.has(url))) throw new ApplicationError("invalid_request", "Selected scope includes URLs outside approved candidate membership");
     const limits = { ...result.limits, ...input.crawlBudget };

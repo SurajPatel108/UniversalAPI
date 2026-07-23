@@ -20,6 +20,9 @@ export type DiscoveryDisposition = "captured" | "duplicate" | "out_of_scope" | "
 export interface DiscoveredPageStructure {
   readonly mainRecordCandidates: number;
   readonly mainLinkCount: number;
+  readonly mainUniqueLinkCount: number;
+  readonly mainAttributeCount: number;
+  readonly repeatedSiblingGroups: number;
   readonly navigationLinkCount: number;
   readonly paginationLinkCount: number;
   readonly mainHeading: string | null;
