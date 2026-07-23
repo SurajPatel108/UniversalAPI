@@ -30,17 +30,55 @@ Build a redacted multi-page fixture corpus and offline evaluation harness before
 
 ## Phase 4 — AI-generated dataset extraction plans with deterministic execution
 
-Implement `SelectorGenerationService`, declarative extraction definitions, static DOM parsing, collection preview, normalization, deterministic extraction, and deterministic evaluation. Following Schema Approval, the pipeline is `ExtractionPlan` → `Deterministic Extraction Engine` → `ExtractionResult` → `EvaluationService` → `EvaluationReport`. The extraction engine only executes the persisted plan and emits records, provenance, and diagnostics; it never determines PASS/FAIL. `EvaluationService` measures the resulting output and assigns PASS, REVIEW, or FAIL without parsing HTML. Support human review and edits, but do not make manual selectors the architectural default.
+Implement a provider-neutral ExtractionPlanGenerationService responsible for producing versioned, declarative extraction plans from an approved Schema and representative samples from a SnapshotCollection. AI operates only on deterministic inputs produced by previous phases and never accesses live websites, performs crawling, executes extraction, or expands dataset scope.
 
-The model proposes an immutable, versioned `ExtractionPlan` for deterministic record discovery, field extraction, page-type handling, pagination behavior, duplicate policy, normalization rules, transforms, and execution policy across the selected dataset. Every plan includes `planId`, `datasetId`, `snapshotCollectionId`, schema version, revision, creation time, provider, model, prompt version, preprocessing version, sampling version, and a deterministic content fingerprint. Any change to selectors, normalization rules, pagination semantics, duplicate policy, extraction behavior, transforms, or execution policy creates a new immutable revision; plans are never edited in place. A persisted plan together with its referenced `SnapshotCollection` must deterministically reproduce identical `ExtractionResult`s without invoking AI.
+Before invoking AI, deterministically prepare representative snapshots using the approved sampling strategy established during schema generation. Inputs consist only of preprocessed semantic representations, validated schema proposals, dataset metadata, page classifications, representative examples, evidence references, and deterministic crawl metadata. Raw crawls, live websites, connector implementations, and execution logic are never provided directly to the model.
 
-Permit only deterministic, static CSS selector primitives supported by Cheerio, including descendant and child selectors, `nth-child`, adjacent siblings, attribute selectors, and supported pseudo-selectors. Validate and reject unsupported primitives before plan persistence. XPath, JavaScript execution, DOM mutation, regular-expression scraping of HTML, arbitrary scripting, executable expressions, and any unsupported selector capability are prohibited.
+The model produces a structured, versioned ExtractionPlan conforming to a strictly validated JSON schema. The plan is entirely declarative and contains no executable code, JavaScript, XPath scripts, Python, regular-expression programs beyond approved declarative primitives, or arbitrary expressions. AI proposes extraction intent only; deterministic systems remain responsible for execution.
 
-Apply a composition-time deterministic `ExecutionPolicy` rather than a one-off HTML extraction flag. It configures `allowHtmlExtraction`, `allowMissingFields`, `allowDuplicateRecords`, `allowPartialCollections`, allowed normalizers, allowed transforms, maximum extraction errors, maximum nested depth, and maximum collection size. Defaults remain conservative, including disallowing HTML extraction. Normalization is an ordered deterministic pipeline: Unicode normalization, trim, whitespace collapse, type conversion, enum normalization, URL canonicalization, date parsing, number parsing, currency normalization, then null/default handling. The order and implementations must be identical across executions.
+The ExtractionPlan must describe every deterministic behavior required to extract the dataset, including:
 
-Persist immutable plan and output versions with dataset identity, snapshot coverage, AI provenance, diagnostics, evaluation results, and approval outcome. Every extracted record and field retains immutable lineage to its `snapshotId`, source page URL, ExtractionPlan revision, selector used, evidence reference, and page-local record index, so each published value can be traced to its originating snapshot. `ExtractionResult` and `EvaluationReport` record deterministic metrics: pages processed, succeeded, and failed; records extracted and rejected; fields extracted; missing required fields; duplicates removed; selector and normalization failures; execution duration; and coverage percentages. Validate per-page and aggregate quality thresholds, duplicate handling, coverage, schema conformance, and representative edge cases.
+dataset identity and schema version
+supported page types
+record discovery strategy
+collection boundaries
+field extraction definitions
+nested record relationships
+pagination behavior
+normalization rules
+validation rules
+duplicate-handling policy
+missing-field policy
+confidence scores
+evidence references
+representative examples
+AI provenance
+prompt version
+provider and model metadata
 
-AI may propose selectors, extraction strategy, page types, record boundaries, and normalization rules. AI must never execute extraction, parse production snapshots during execution, normalize runtime values, repair missing records during execution, evaluate PASS/FAIL, modify snapshots, execute code, or bypass deterministic validation. The deterministic runtime remains authoritative. ExtractionPlans remain connector-agnostic: website extraction is one deterministic executor, while future PDF, spreadsheet, database, Notion, and other connectors use the same declarative plan through connector-specific deterministic executors without changing the planning architecture.
+Record discovery defines how individual records are identified within each supported page type using declarative selectors and structural rules. Field definitions specify deterministic extraction primitives such as element selection, text extraction, attribute extraction, HTML extraction where explicitly permitted, optional transformations, required-field behavior, default values, and normalization requirements. Relationships between parent and child records are explicitly represented so nested collections may be extracted without ambiguity.
+
+Normalization is completely deterministic. It includes operations such as whitespace normalization, currency parsing, numeric conversion, boolean normalization, date parsing, enumeration mapping, URL canonicalization, text cleanup, null handling, duplicate elimination, and other approved transformations. AI proposes these rules, but deterministic components execute every transformation.
+
+The ExtractionPlan also specifies deterministic validation requirements including required-field constraints, schema conformance, uniqueness requirements, cardinality expectations, record completeness thresholds, field-level confidence thresholds, collection-level coverage expectations, and page-type consistency requirements.
+
+After generation, deterministic validation verifies that the proposed ExtractionPlan satisfies the required JSON schema, references only approved declarative extraction primitives, contains complete evidence references, supports every discovered page type, references only approved schema fields, and contains no executable content or unsupported operations. Invalid plans are rejected before execution.
+
+Approved plans are executed by a deterministic Extraction Engine against every applicable snapshot within the SnapshotCollection. The engine performs static DOM parsing and applies the declarative ExtractionPlan without invoking AI during execution. Every page is processed identically using deterministic parsing rules to ensure reproducibility, consistency, and repeatability across executions.
+
+Execution produces a versioned ExtractionResult containing structured records, extraction diagnostics, normalization statistics, validation results, coverage metrics, duplicate statistics, skipped pages, failed pages, unsupported pages, field-level success rates, collection-level completeness, execution timing, and deterministic execution metadata.
+
+Following execution, an Evaluation Service performs deterministic quality analysis across the entire dataset. Evaluation verifies schema conformance, field completeness, extraction coverage, duplicate rates, normalization success, page-type consistency, representative edge cases, record quality, and aggregate dataset integrity. Evaluation generates reproducible quality metrics independent of the AI provider.
+
+Quality policies determine whether an ExtractionPlan is automatically accepted, requires human review, or is rejected. Approval decisions are based on deterministic quality thresholds rather than model confidence alone. Human reviewers may inspect generated plans, evaluation reports, representative extracted records, diagnostics, and evidence before approving publication. Manual edits remain supported but are not the primary architectural path.
+
+Persist immutable versions of the ExtractionPlan, ExtractionResult, EvaluationReport, and approval decision together with complete lineage including dataset identity, schema version, SnapshotCollection revision, preprocessing version, sampling strategy, prompt version, provider, model version, execution engine version, evaluation version, timestamps, diagnostics, and audit metadata. Every published dataset must remain fully traceable from API responses back to the exact snapshots, schema proposal, extraction plan, and evaluation that produced it.
+
+Cache generated ExtractionPlans using deterministic cache keys derived from snapshot fingerprints, preprocessing version, schema version, prompt version, provider, and model version so identical inputs reuse previously validated plans without additional AI invocations.
+
+Develop a comprehensive offline evaluation harness before production deployment. Maintain a redacted fixture corpus spanning diverse websites, layouts, pagination styles, nested collections, edge cases, and malformed pages. Every ExtractionPlan implementation must pass deterministic regression tests, quality thresholds, and reproducibility checks before customer-facing use.
+
+AI is introduced in this phase solely as a semantic planner that proposes declarative extraction strategies. Deterministic systems remain authoritative for execution, normalization, validation, quality evaluation, caching, approval, persistence, auditing, and every downstream behavior. No AI model executes extraction logic, bypasses validation, expands dataset scope, modifies crawl plans, or directly produces customer-visible API responses.
 
 ## Phase 5 — dataset API publication
 
